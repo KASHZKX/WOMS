@@ -3,6 +3,11 @@ global:
 
 imageRegistry: docker.io/d11nn
 
+scheduleQueue:
+  bootstrapServers: "kafka.{{ .Release.Namespace }}.svc.cluster.local:9092"
+  topic: woms.schedule.jobs
+  consumerGroup: woms-scheduler-workers
+
 api:
   replicaCount: 2
   pdb:
@@ -60,9 +65,27 @@ web:
   replicaCount: 2
   pdb:
     minAvailable: 1
+  service:
+    type: LoadBalancer
+    annotations: {}
   image:
     repository: woms-web
     tag: v0.1.52
+  metrics:
+    enabled: true
+    port: 9113
+    image:
+      repository: nginx/nginx-prometheus-exporter
+      tag: "1.1.0"
+      pullPolicy: IfNotPresent
+    scrapeUri: http://127.0.0.1:8080/nginx_status
+    resources:
+      requests:
+        cpu: 10m
+        memory: 32Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
   resources:
     requests:
       cpu: 50m
@@ -96,87 +119,12 @@ keda:
       stabilizationWindowSeconds: 120
       percent: 50
       periodSeconds: 60
-  kafka:
-    enabled: true
-    bootstrapServers: "kafka.{{ .Release.Namespace }}.svc.cluster.local:9092"
-    topic: woms.schedule.jobs
-    consumerGroup: woms-scheduler-workers
-    lagThreshold: "10"
-    offsetResetPolicy: latest
-  cpu:
-    enabled: true
-    targetUtilization: "70"
-  gthulhu:
-    enabled: false
-    prometheusServerAddress: "http://monitoring-kube-prometheus-prometheus.monitoring:9090"
-    metricName: woms_worker_gthulhu_involuntary_ctx_switches_rate
+  prometheus:
+    serverAddress: "http://{{ include \"woms.fullname\" . }}-prometheus.{{ .Release.Namespace }}:9090"
+    metricName: woms_web_nginx_requests_per_second_per_pod
     threshold: "20"
     query: |-
-      avg(rate(gthulhu_pod_involuntary_ctx_switches_total{exported_namespace="{{ .Release.Namespace }}",pod_name=~"{{ include "woms.fullname" . }}-worker-.*"}[2m]))
-
-gthulhu:
-  enabled: false
-  crdNamespace:
-    create: false
-    name: '{{ .Release.Namespace }}'
-  scheduler:
-    runtimeMode: scheduler
-    image:
-      repository: docker.io/d11nn/gthulhu-scx
-      pullPolicy: IfNotPresent
-      tag: "vX.Y.Z"
-    sidecar:
-      enabled: false
-    config:
-      mode: none
-      kernelMode: false
-      maxTimeWatchdog: false
-      earlyProcessing: false
-      builtinIdle: false
-    monitor:
-      enabled: true
-      bpfObjectPath: /gthulhu/sched_monitor.bpf.o
-      collectionIntervalSec: 10
-      monitorAll: false
-      streamEvents: false
-      prometheusPort: 9090
-      enableCRDWatcher: true
-      kubeConfigPath: ""
-    api:
-      enabled: false
-      authEnabled: false
-      interval: 5
-  manager:
-    enabled: false
-  mongodb:
-    enabled: false
-  monitoring:
-    enabled: true
-    path: /metrics
-    serviceMonitor:
-      enabled: false
-      labels: {}
-      interval: 15s
-  podSchedulingMetrics:
-    enabled: true
-    name: '{{ include "woms.fullname" . }}-worker-monitor'
-    namespace: '{{ .Release.Namespace }}'
-    labelSelectors:
-      - key: app.kubernetes.io/component
-        value: scheduler-worker
-      - key: app.kubernetes.io/instance
-        value: '{{ .Release.Name }}'
-    k8sNamespaces:
-      - '{{ .Release.Namespace }}'
-    collectionIntervalSeconds: 10
-    commandRegex: ""
-    metrics:
-      voluntaryCtxSwitches: true
-      involuntaryCtxSwitches: true
-      cpuTimeNs: true
-      waitTimeNs: true
-      runCount: true
-      cpuMigrations: true
+      sum(rate(nginx_http_requests_total{job="woms-web-nginx",namespace="{{ .Release.Namespace }}"}[1m])) / clamp_min(count(up{job="woms-web-nginx",namespace="{{ .Release.Namespace }}"}), 1)
 
 postgresql:
   enabled: true
@@ -278,12 +226,9 @@ monitoring:
         path: /metrics
         port: "8080"
         interval: 15s
-      # Gthulhu pods: scrape /metrics on port 9091
-      gthulhu:
-        enabled: false
+      web:
         path: /metrics
-        service: '{{ .Release.Name }}-gthulhu-scheduler-sidecar'
-        port: "9090"
+        port: "metrics"
         interval: 15s
 
   # Grafana deployment requires Grafana authentication before dashboard viewing.

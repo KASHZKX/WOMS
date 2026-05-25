@@ -573,28 +573,14 @@ func (s *Server) handleHPAPeakDemo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if claims.Role != domain.RoleAdmin {
-		writeError(w, http.StatusForbidden, "只有管理員可以觸發多產線排程尖峰。")
+		writeError(w, http.StatusForbidden, "只有管理員可以查看 web autoscaling demo。")
 		return
 	}
 	switch r.Method {
 	case http.MethodGet:
 		writeJSON(w, http.StatusOK, hpaPeakResponse{Summary: s.store.HPAPeakSummary()})
 	case http.MethodPost:
-		summary, err := s.store.CreateHPAPeakDemo(claims)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		publishCtx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
-		err = s.publishHPAPeakJobs(publishCtx, s.store.HPAPeakJobs())
-		cancel()
-		if err != nil {
-			_, _ = s.store.ClearHPAPeakDemo(claims)
-			log.Printf("hpa peak schedule job publish failed: %v", err)
-			writeError(w, http.StatusBadGateway, "排程尖峰任務送出失敗，請稍後再試。")
-			return
-		}
-		writeJSON(w, http.StatusAccepted, hpaPeakResponse{Summary: summary})
+		writeJSON(w, http.StatusAccepted, hpaPeakResponse{Summary: s.store.HPAPeakSummary()})
 	case http.MethodDelete:
 		summary, err := s.store.ClearHPAPeakDemo(claims)
 		if err != nil {
@@ -902,6 +888,9 @@ type hpaPeakSummary struct {
 	ConsumerGroup  string               `json:"consumerGroup"`
 	HPAName        string               `json:"hpaName"`
 	DeploymentName string               `json:"deploymentName"`
+	MetricName     string               `json:"metricName"`
+	GrafanaPath    string               `json:"grafanaPath"`
+	LoadCommand    string               `json:"loadCommand"`
 	Reason         string               `json:"reason"`
 	WatchCommand   string               `json:"watchCommand"`
 	FailedMessages []string             `json:"failedMessages,omitempty"`
@@ -920,7 +909,7 @@ type hpaAutoscalingState struct {
 	DeploymentReplicas int    `json:"deploymentReplicas"`
 	ReadyReplicas      int    `json:"readyReplicas"`
 	AvailableReplicas  int    `json:"availableReplicas"`
-	WorkerPods         int    `json:"workerPods"`
+	PodCount           int    `json:"podCount"`
 	ReadyPods          int    `json:"readyPods"`
 	Error              string `json:"error,omitempty"`
 }
@@ -2425,10 +2414,13 @@ func hpaPeakSummaryDefaults() hpaPeakSummary {
 		Statuses:       map[string]int{},
 		Topic:          envDefault("KAFKA_SCHEDULE_TOPIC", "woms.schedule.jobs"),
 		ConsumerGroup:  envDefault("KAFKA_CONSUMER_GROUP", "woms-scheduler-workers"),
-		HPAName:        envDefault("HPA_DEMO_HPA_NAME", "woms-woms-worker-hpa"),
-		DeploymentName: envDefault("HPA_DEMO_DEPLOYMENT_NAME", "woms-woms-worker"),
-		Reason:         "幾百條產線同時進行月底排程，Kafka lag 上升時 KEDA 會擴充 scheduler-worker pods；jobs 完成後 HPA 可能因 cooldown 短暫維持高副本數。",
-		WatchCommand:   fmt.Sprintf("kubectl get hpa,deploy,pod -n %s -w", namespace),
+		HPAName:        envDefault("HPA_DEMO_HPA_NAME", "woms-woms-web-hpa"),
+		DeploymentName: envDefault("HPA_DEMO_DEPLOYMENT_NAME", "woms-woms-web"),
+		MetricName:     envDefault("HPA_DEMO_METRIC_NAME", "woms_web_nginx_requests_per_second_per_pod"),
+		GrafanaPath:    envDefault("HPA_DEMO_GRAFANA_PATH", "/grafana/d/woms-monitoring/woms-monitoring"),
+		LoadCommand:    envDefault("HPA_DEMO_LOAD_COMMAND", `hey -z 5m -c 80 "http://<LOAD_BALANCER_IP>:8080/"`),
+		Reason:         "GKE LoadBalancer 導入多使用者 web 流量時，NGINX exporter 暴露 per-pod req/s；Prometheus、Grafana 與 KEDA 使用同一個指標擴充 web pods。",
+		WatchCommand:   fmt.Sprintf("kubectl get hpa,deploy,pod -n %s -l app.kubernetes.io/component=web -w", namespace),
 	}
 	summary.Autoscaling = loadHPAAutoscalingState(namespace, summary.HPAName, summary.DeploymentName)
 	return summary
@@ -2439,7 +2431,7 @@ func loadHPAAutoscalingState(namespace, hpaName, deploymentName string) *hpaAuto
 	if host == "" {
 		return nil
 	}
-	labelSelector := envDefault("HPA_DEMO_POD_LABEL_SELECTOR", "app.kubernetes.io/component=scheduler-worker")
+	labelSelector := envDefault("HPA_DEMO_POD_LABEL_SELECTOR", "app.kubernetes.io/component=web")
 	cacheKey := strings.Join([]string{host, namespace, hpaName, deploymentName, labelSelector}, "\x00")
 	now := time.Now()
 	hpaAutoscalingCache.Lock()
@@ -2530,7 +2522,7 @@ func loadHPAAutoscalingState(namespace, hpaName, deploymentName string) *hpaAuto
 	if err := kubernetesGetJSON(ctx, client, baseURL, string(token), podsPath, &pods); err != nil {
 		messages = append(messages, "Pod 狀態讀取失敗："+err.Error())
 	} else {
-		state.WorkerPods = len(pods.Items)
+		state.PodCount = len(pods.Items)
 		for _, pod := range pods.Items {
 			if pod.Status.Phase != "Running" {
 				continue

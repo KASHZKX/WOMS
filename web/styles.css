@@ -551,6 +551,7 @@ button:hover {
 
 .order-card-main div {
   display: grid;
+  min-width: 0;
   gap: 3px;
 }
 
@@ -612,16 +613,17 @@ button:hover {
 
 .sales-pending-toggle {
   justify-self: end;
-  width: 34px;
-  min-width: 34px;
+  width: max-content;
+  min-width: 76px;
   min-height: 30px;
-  padding: 0;
+  padding: 0 10px;
   border: 1px solid var(--line);
   border-radius: 6px;
   background: #ffffff;
   color: var(--ink);
-  font-size: 16px;
-  line-height: 1;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.2;
 }
 
 .sales-pending-toggle:hover {
@@ -657,6 +659,7 @@ textarea {
 
 .tag {
   display: inline-flex;
+  flex: 0 0 auto;
   min-width: 48px;
   justify-content: center;
   border-radius: 999px;
@@ -665,6 +668,7 @@ textarea {
   color: var(--accent-dark);
   font-size: 12px;
   font-weight: 800;
+  white-space: nowrap;
 }
 
 .tag.high {
@@ -1092,6 +1096,39 @@ body[data-role="scheduler"][data-scheduler-panel-open="false"] .action-drawer {
   gap: 16px;
 }
 
+.preview-calendar-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.preview-calendar-heading h3 {
+  margin: 0;
+}
+
+.segmented-control {
+  display: inline-flex;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #ffffff;
+}
+
+.segmented-control button {
+  min-height: 32px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+}
+
+.segmented-control button.active {
+  background: #e0f2f1;
+  color: var(--accent-dark);
+}
+
 .preview-page-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(420px, 0.46fr);
@@ -1177,6 +1214,11 @@ body[data-role="scheduler"][data-scheduler-panel-open="false"] .action-drawer {
 
   .preview-page-header {
     align-items: stretch;
+  }
+
+  .preview-calendar-heading {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .preview-page-grid .calendar-grid {

@@ -1,78 +1,120 @@
-# WOMS 實作後驗證指南
+# WOMS 驗證指南
 
-## 1. 本機靜態與單元測試
+這台工作機只執行靜態、單元、Go 與 Helm render 驗證。未在本機做 UI 視覺驗證。以下瀏覽器與 GKE 驗證必須在可開瀏覽器、且能取得 Kubernetes LoadBalancer 的環境執行。
+
+## 1. 本機非 UI 驗證
 
 ```bash
-go test ./...
 npm run test:web
+go test ./...
+helm template woms ./deploy/helm/woms --namespace woms
+./scripts/verify-hpa-render.sh
 test -z "$(gofmt -l .)"
 ```
 
-期望結果：
+期望：
 
-- 所有 Go tests 通過。
-- 前端 mock tests 通過。
-- `gofmt` 沒有輸出。
+- Frontend 與 Helm static tests 通過。
+- Go tests 通過。
+- Helm render 出 `Deployment/api`、`Deployment/worker`、`Deployment/web`、Prometheus/Grafana、web `ScaledObject` 與 PDB。
+- `ScaledObject` 指向 `Deployment/woms-woms-web`，並建立 HPA `woms-woms-web-hpa`。
+- Active KEDA triggers 只有 `woms_web_nginx_requests_per_second_per_pod` 的 Prometheus trigger。
+- Rendered manifests 不包含 worker Kafka lag、worker CPU、Gthulhu Prometheus triggers、`PodSchedulingMetrics` 或 Gthulhu child chart。
 
-## 2. API/JWT/RBAC 驗證
+## 2. 手動瀏覽器 UI 驗證
 
-啟動 API：
+在可使用瀏覽器的環境啟動 WOMS，逐項確認：
+
+1. Scheduler pending badge：
+   - 以 `scheduler-a` / `demo` 登入。
+   - 使用一般桌機瀏覽器寬度。
+   - 確認待排程訂單卡片的 `待排程` badge 單行顯示，`程` 不可換行。
+   - 改以 `sales` / `demo` 登入，確認待排程卡片 badge 形狀與間距一致。
+
+2. Sales 待排程訂單修改：
+   - 以 `sales` / `demo` 登入。
+   - 建立或找到同一 sales 使用者建立的 `待排程` 訂單。
+   - 確認舊的純下三角按鈕已改成文字按鈕 `訂單修改`。
+   - 點一次：既有交期/數量修改表單展開。
+   - 再點一次：表單收合。
+   - 再展開並修改交期或數量後送出，確認訂單仍維持既有待排程流程。
+
+3. Sales draft preview calendar 切換：
+   - 以 `sales` / `demo` 登入。
+   - 建立未來交期的草稿訂單並開啟 schedule preview。
+   - 點 `待排程`：preview calendar 顯示本次 sales draft preview allocations。
+   - 點 `已排程`：preview calendar 切換為正式 persisted calendar allocations。
+   - 再切回 `待排程`，確認 draft preview allocations 回來。
+   - 確認最後「放到待排程訂單」流程仍可建立待排程訂單。
+
+## 3. GKE LoadBalancer Web HPA 驗證
+
+部署到 GKE 或等價 LoadBalancer-capable cluster：
+
+```bash
+helm upgrade --install woms ./deploy/helm/woms \
+  --namespace woms --create-namespace
+kubectl get svc woms-woms-web -n woms -w
+```
+
+確認 active resources：
+
+```bash
+kubectl get scaledobject,hpa,deploy,pod,svc -n woms
+kubectl describe hpa woms-woms-web-hpa -n woms
+kubectl get scaledobject woms-woms-web -n woms -o yaml
+```
+
+期望：
+
+- `woms-woms-web` Service 是 `LoadBalancer`。
+- `woms-woms-web` ScaledObject 指向 `Deployment/woms-woms-web`。
+- HPA 名稱是 `woms-woms-web-hpa`。
+- Trigger metric 是 `woms_web_nginx_requests_per_second_per_pod`。
+
+送入多使用者流量：
+
+```bash
+LB_IP="$(kubectl get svc woms-woms-web -n woms -o jsonpath='{.status.loadBalancer.ingress[0].ip}')"
+hey -z 5m -c 80 "http://${LB_IP}:8080/"
+```
+
+觀察：
+
+```bash
+kubectl get hpa,deploy,pod -n woms -l app.kubernetes.io/component=web -w
+```
+
+Grafana：
+
+- 開啟 `http://<LOAD_BALANCER_IP>:8080/grafana/`。
+- 開啟 dashboard `WOMS web autoscaling`。
+- 確認 `Per-pod NGINX req/s` 在壓測期間上升。
+- 確認 `NGINX req/s by web pod` 在 scale-out 後顯示流量分散到多個 pods。
+
+期望：
+
+- KEDA/HPA 將 web replicas 擴到高於 `minReplicaCount`。
+- 新 web pods 進入 Ready。
+- 流量分散到多個 web pods。
+- 停止流量並等待 cooldown 後 replicas scale down。
+
+## 4. API、RBAC 與 Calendar API 檢查
 
 ```bash
 JWT_SECRET=local-dev-secret go run ./cmd/api
-```
-
-登入 sales：
-
-```bash
-curl -s http://localhost:8080/api/auth/login \
-  -H 'Content-Type: application/json' \
-  -d '{"username":"sales","password":"demo"}'
-```
-
-檢查無 token：
-
-```bash
 curl -i http://localhost:8080/internal/auth/verify
 ```
 
-期望：`401 Unauthorized`。
+期望：未帶 token 回 `401`。
 
-檢查 sales 禁止建立排程任務：
+檢查角色邊界：
 
-```bash
-curl -i http://localhost:8080/api/schedules/jobs \
-  -H "Authorization: Bearer <sales-token>" \
-  -H 'Content-Type: application/json' \
-  -d '{"lineId":"A","startDate":"2026-05-01"}'
-```
+- Sales 呼叫 scheduler-only schedule job APIs 會回 `403`。
+- Scheduler A 不能讀取或修改 Scheduler B 產線資料。
+- `GET /api/schedules/calendar?lineId=A&month=2026-05` 會回授權產線的 persisted allocations。
 
-期望：`403 Forbidden`。
-
-檢查排程工程師產線隔離：
-
-- 用 `scheduler-b` 建立 B 線 job。
-- 用 `scheduler-a` 查詢該 job。
-- 期望：`403 Forbidden`。
-
-檢查 admin 帳號管理：
-
-```bash
-curl -i http://localhost:8080/api/users \
-  -H "Authorization: Bearer <admin-token>" \
-  -H 'Content-Type: application/json' \
-  -d '{"username":"class-sales","password":"temporary","role":"sales"}'
-```
-
-期望：`201 Created`，response 不包含 password material，且新帳號可登入。sales 或 scheduler token 呼叫同一 endpoint 會回 `403 Forbidden`。
-
-檢查月曆行為：
-
-- 用排程工程師建立排程任務。
-- `GET /api/schedules/calendar?lineId=A&month=2026-05` 會回傳已保存 allocations。
-- 查詢其他排程工程師的產線會回錯誤。
-
-## 3. Docker 驗證
+## 5. Docker 與 Web Proxy 檢查
 
 ```bash
 docker build -f Dockerfile.api -t woms-api:local .
@@ -83,196 +125,15 @@ docker compose up --build
 
 期望：
 
-- API health: `curl http://localhost:8080/healthz`
-- Web: `http://localhost:8081`
-- 透過 Web proxy 存取 Grafana：`http://localhost:8081/grafana`
-- 沒有 Grafana session 時會先看到 Grafana login page，不會直接看到 dashboard。
+- API health：`curl http://localhost:8080/healthz`
+- Web：`http://localhost:8081`
+- 透過 web proxy 開啟 Grafana：`http://localhost:8081/grafana`
+- 未登入 Grafana 的使用者會看到 Grafana login page。
 
-## 4. Helm Render 驗證
+## 6. 完成檢查清單
 
-```bash
-helm template woms ./deploy/helm/woms
-helm template woms ./deploy/helm/woms --set ingress.enabled=true --set ingress.host=woms.local
-./scripts/verify-hpa-render.sh
-```
-
-期望輸出包含：
-
-- `Deployment`：api、worker、web。
-- Web deployment env `GRAFANA_UPSTREAM=woms-woms-grafana:3000`。
-- 使用 ingress host `woms.local` render 時，Grafana deployment env 包含 `GF_SERVER_ROOT_URL=http://woms.local/grafana/` 與 `GF_SERVER_SERVE_FROM_SUB_PATH=true`。
-- Grafana deployment env 包含 `GF_AUTH_ANONYMOUS_ENABLED=false`。
-- Grafana admin credentials 由 Secret 提供。
-- `Ingress`：public、api-secure。
-- `ScaledObject`：worker Kafka/CPU triggers。
-- `ScaledObject.spec.advanced.horizontalPodAutoscalerConfig.name`：`woms-woms-worker-hpa`。
-- `PodDisruptionBudget`：api 與 web，且 `minAvailable: 1`。
-
-## 5. Ingress / Gateway 驗證
-
-部署後執行：
-
-```bash
-curl -i https://woms.local/api/orders
-curl -i https://woms.local/api/orders -H "Authorization: Bearer <valid-token>"
-```
-
-期望：
-
-- 無 token 回 `401`。
-- 有效 token 通過 Ingress auth。
-- API 仍會執行自身 JWT/RBAC 檢查。
-- HTTP 會 redirect HTTPS。
-- Grafana 可透過 `http(s)://woms.local/grafana` 開啟，不需要另外對 Grafana port-forward，browser requests 會維持在 `/grafana/api/...`，且未登入使用者會看到 Grafana login 而不是 dashboard。
-
-## 6. KEDA / HPA 驗證
-
-確認資源：
-
-```bash
-kubectl get scaledobject,hpa -n woms
-kubectl describe scaledobject -n woms
-```
-
-用 admin 登入 web，按「建立多產線排程尖峰」。確認畫面顯示 200 條產線、1,000 張訂單與 400 個 queued jobs，並顯示 Kafka topic、consumer group、HPA 與 deployment 名稱。接著觀察：
-
-```bash
-kubectl get deploy -n woms -w
-kubectl get hpa -n woms -w
-NAMESPACE=woms ./scripts/verify-k8s.sh
-```
-
-`verify-k8s.sh` 會驗證預設不啟用 Ingress 的 render。若部署時啟用 Ingress，請先用 `--set ingress.enabled=true` 安裝，再執行 `INGRESS_ENABLED=true NAMESPACE=woms ./scripts/verify-k8s.sh`。
-
-期望：
-
-- Kafka lag 上升。
-- worker replicas 超過 `minReplicaCount`。
-- lag 清空並等待 cooldown 後 replicas scale down。
-- 若 CPU trigger 未生效，先確認 metrics-server 與 pod resource requests。
-- demo 後按「清除排程尖峰資料」，確認 `L001-L200` 訂單與 jobs 清空。
-
-## 7. API/Web High Availability 驗證
-
-```bash
-kubectl get deploy,pdb -n woms
-kubectl describe pdb woms-woms-api -n woms
-kubectl describe pdb woms-woms-web -n woms
-```
-
-期望：
-
-- API 與 web 預設各有兩個 replicas。
-- API 與 web PDB 都要求 `minAvailable: 1`。
-- 在多節點 cluster 發生 voluntary disruption 時，至少保留一個 API pod 與一個 web pod 可用。
-
-## 8. Gthulhu HPA Demo 驗證
-
-前置條件：
-
-- MicroK8s 已啟用 `dns`、`hostpath-storage` 或 `storage`、`metrics-server`、`keda`，如需 local image fallback 則啟用 `registry`。
-- 從 `/home/ubuntu/Gthulhu` 的 `feat/woms-poc` branch 用 `./scripts/build-push-gthulhu-images.sh` build Gthulhu images。
-- 用 `-f deploy/helm/woms/values-gthulhu-monitor.yaml` 安裝 WOMS，並把 scheduler、sidecar、manager image tag 都設為驗證 tag。
-- 內建 Prometheus target 會加上 scrape-level `namespace` label，因此 Gthulhu 原始 pod namespace 需要用 `exported_namespace="woms"` 查詢。
-- 這個 PoC image 的 integration overlay 會啟用 `gthulhu.scheduler.monitor.monitorAll=true`；worker 篩選由 Prometheus `pod_name` query 負責。
-
-安裝範例：
-
-```bash
-helm upgrade --install woms ./deploy/helm/woms \
-  --namespace woms --create-namespace \
-  -f ./deploy/helm/woms/values-gthulhu-monitor.yaml \
-  --set gthulhu.scheduler.image.tag=woms-integration-<gthulhu-short-sha> \
-  --set gthulhu.scheduler.sidecar.image.tag=woms-integration-<gthulhu-short-sha> \
-  --set gthulhu.manager.image.tag=woms-integration-<gthulhu-short-sha>
-```
-
-確認 trigger wiring：
-
-```bash
-./scripts/verify-gthulhu-monitoring.sh
-kubectl get scaledobject woms-woms-worker -n woms -o yaml
-kubectl describe hpa woms-woms-worker-hpa -n woms
-```
-
-期望：
-
-- `ScaledObject` 有三個 triggers：Kafka、CPU、Prometheus。
-- Kafka 仍為 `lagThreshold: "10"`。
-- CPU 仍為 `value: "70"`。
-- Gthulhu scaler health 為 `Happy`。
-- Prometheus 查得到 WOMS API metrics 與 `woms-woms-worker-*` 的 `gthulhu_pod_*` metrics。
-- Grafana dashboard config 內有三個 Gthulhu panels。
-
-Proof demo 流程：
-
-三種 scenario 分開跑，避免其他 trigger 干擾：
-
-```bash
-HPA_SCENARIO=cpu ./scripts/verify-hpa-behavior.sh
-HPA_SCENARIO=kafka ./scripts/verify-hpa-behavior.sh
-HPA_SCENARIO=gthulhu ./scripts/verify-hpa-behavior.sh
-```
-
-`verify-hpa-behavior.sh` 預設使用 `GTHULHU_IMAGE_TAG=woms-integration-f71f78a`；驗證其他 Gthulhu tag 時請覆寫這個環境變數。
-
-成功時會看到類似：
-
-```text
-New size: 4; reason: external metric s2-prometheus-woms_worker_gthulhu_involuntary_ctx_switches_rate above target
-New size: 8; reason: external metric s2-prometheus-woms_worker_gthulhu_involuntary_ctx_switches_rate above target
-```
-
-也可查 Prometheus：
-
-```promql
-avg(rate(gthulhu_pod_involuntary_ctx_switches_total{exported_namespace="woms",pod_name=~"woms-woms-worker-.*"}[2m]))
-avg(rate(gthulhu_pod_wait_time_nanoseconds_total{exported_namespace="woms",pod_name=~"woms-woms-worker-.*"}[2m])) / 1000000000
-sum(gthulhu_pod_process_count{exported_namespace="woms",pod_name=~"woms-woms-worker-.*"})
-```
-
-Scripts 只會清理臨時壓測 pods/jobs，不會移除 WOMS、Gthulhu、Prometheus 或 Grafana，方便後續檢查。
-
-## 9. Redis Lock 驗證
-
-同產線同時送兩個排程 job：
-
-- 期望 scheduler-worker 使用 Redis `woms:locks:schedule-line:<lineId>`，不產生重疊 schedule version；其中一個 job 應等待、重試或乾淨失敗。
-
-不同產線同時送 job：
-
-- 期望可並行處理。
-
-長時間 worker job 執行期間檢查 Redis：
-
-```bash
-redis-cli -h <redis-host> --scan --pattern 'woms:locks:schedule-line:*'
-redis-cli -h <redis-host> pttl woms:locks:schedule-line:A
-```
-
-期望：job 執行期間 lock 有正 TTL，job completed/failed 後 lock 會釋放。
-
-## 10. 完成功能標準
-
-- 測試通過。
-- README zh-TW/en 更新。
-- `.gitignore` 已涵蓋新增 generated/local files。
-- Docker/Helm/CI 設定同步。
-- `git add`、commit、push 完成。
-
-## 11. 前端 Smoke 驗證
-
-- 在 `http://127.0.0.1:8081` 登入。
-- 重新整理瀏覽器，確認 session 會恢復。
-- 確認登入後會隱藏帳號密碼欄位，頁首顯示目前帳號與登出按鈕。
-- 使用 `admin` / `demo` 登入，確認 Admin panel 可見，且非 admin 看不到。
-- 切換客戶、產線、優先級精準篩選；確認狀態篩選是單選，且客戶選單只列出目前狀態/優先級範圍內的客戶。
-- 用 scheduler 確認待排程訂單不能拖到當日或過去月曆日期，再拖到指定的未來月曆日期；接受 preview 後確認正式 allocation 保留在拖放日期。
-- 用 scheduler 建立衝突，在衝突面板選取衝突訂單與可移動的低優先級已排程訂單，預覽最早完成解法，接受後確認被移動訂單的舊未鎖定 allocation 已被替換。
-- 用 scheduler 點擊月曆內的已排程訂單，確認可轉為生產中；再點擊生產中訂單，確認可開啟回報生產。
-- 輸入部分完成數量後送出，確認同一張訂單編號會以剩餘數量回到待排程。
-- 用 sales 以未來交期建立草稿訂單 preview，確認 preview page 會高亮日曆結果，再確認放到待排程訂單；同時確認今日與過去交期會以 `無法被接受的交期` 阻擋。
-- 用 scheduler 選取待排程訂單，先 preview，再從 preview page 確認執行。缺少 `previewId` 的直接排程 API 必須失敗。
-- 刪除已選取的待排程/已排程訂單，確認被刪除訂單的月曆 allocation 也會消失。
-- 使用衝突測試按鈕建立同日大量訂單，preview 後確認衝突面板佔滿預覽視窗右側，且解法控制項不會被裁切。
-- 確認權限不足與操作錯誤都會用彈出訊息視窗顯示。
+- 本機非 UI 測試通過。
+- 已在瀏覽器環境完成上述 UI 檢查。
+- 已在 cluster 環境完成上述 GKE LoadBalancer/HPA 檢查。
+- README 與兩份 verification docs 都已同步更新英文與 zh-TW。
+- 未提交 generated files、secrets、本機 volumes 或 build output。

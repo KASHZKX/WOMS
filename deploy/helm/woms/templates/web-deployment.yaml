@@ -6,7 +6,9 @@ metadata:
     {{- include "woms.labels" . | nindent 4 }}
     app.kubernetes.io/component: web
 spec:
+  {{- if not .Values.keda.enabled }}
   replicas: {{ .Values.web.replicaCount }}
+  {{- end }}
   selector:
     matchLabels:
       app.kubernetes.io/instance: {{ .Release.Name }}
@@ -51,6 +53,22 @@ spec:
               mountPath: /var/run
             - name: tmp
               mountPath: /tmp
+        {{- if .Values.web.metrics.enabled }}
+        - name: nginx-exporter
+          image: "{{ .Values.web.metrics.image.repository }}:{{ .Values.web.metrics.image.tag }}"
+          imagePullPolicy: {{ .Values.web.metrics.image.pullPolicy }}
+          args:
+            - -nginx.scrape-uri={{ .Values.web.metrics.scrapeUri }}
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.web.metrics.port }}
+          resources:
+            {{- toYaml .Values.web.metrics.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+        {{- end }}
       volumes:
         - name: nginx-conf
           emptyDir: {}

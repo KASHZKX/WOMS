@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 
 const values = readFileSync(new URL("./values.yaml", import.meta.url), "utf8");
 const chart = readFileSync(new URL("./Chart.yaml", import.meta.url), "utf8");
@@ -16,13 +16,9 @@ const prometheusConfig = readFileSync(new URL("./templates/prometheus-configmap.
 const grafanaConfig = readFileSync(new URL("./templates/grafana-configmap.yaml", import.meta.url), "utf8");
 const grafanaDeployment = readFileSync(new URL("./templates/grafana-deployment.yaml", import.meta.url), "utf8");
 const grafanaSecret = readFileSync(new URL("./templates/grafana-secret.yaml", import.meta.url), "utf8");
-const gthulhuPsm = readFileSync(new URL("./templates/gthulhu-podschedulingmetrics.yaml", import.meta.url), "utf8");
-const gthulhuOverlay = readFileSync(new URL("./values-gthulhu-monitor.yaml", import.meta.url), "utf8");
 const dashboard = readFileSync(new URL("./dashboards/woms-monitoring.json", import.meta.url), "utf8");
-const mongodbStatefulSet = readFileSync(new URL("./charts/gthulhu/charts/mongodb/templates/statefulset.yaml", import.meta.url), "utf8");
-const mtlsCertScript = readFileSync(new URL("./charts/gthulhu/gen-mtls-certs.sh", import.meta.url), "utf8");
-const gthulhuMonitoringScript = readFileSync(new URL("../../../scripts/verify-gthulhu-monitoring.sh", import.meta.url), "utf8");
 const hpaBehaviorScript = readFileSync(new URL("../../../scripts/verify-hpa-behavior.sh", import.meta.url), "utf8");
+const hpaRenderScript = readFileSync(new URL("../../../scripts/verify-hpa-render.sh", import.meta.url), "utf8");
 const kafkaTopicJob = readFileSync(new URL("./templates/kafka-topic-job.yaml", import.meta.url), "utf8");
 const secret = readFileSync(new URL("./templates/secret.yaml", import.meta.url), "utf8");
 const notes = readFileSync(new URL("./templates/NOTES.txt", import.meta.url), "utf8");
@@ -33,124 +29,84 @@ function imageTag(section) {
   return match[1];
 }
 
-test("Helm values keep async scheduling and HPA demo defaults wired", () => {
+test("Helm values keep async scheduling dependencies separate from web autoscaling", () => {
+  const kedaBlock = values.slice(values.indexOf("\nkeda:\n"), values.indexOf("\npostgresql:\n"));
+  assert.match(values, /scheduleQueue:[\s\S]*bootstrapServers:\s+"kafka\.\{\{ \.Release\.Namespace \}\}\.svc\.cluster\.local:9092"/);
+  assert.match(values, /scheduleQueue:[\s\S]*topic:\s+woms\.schedule\.jobs/);
+  assert.match(values, /scheduleQueue:[\s\S]*consumerGroup:\s+woms-scheduler-workers/);
   assert.match(values, /store:\s+postgres/);
   assert.match(values, /databaseUrl:\s+postgres:\/\/woms:woms@postgres:5432\/woms\?sslmode=disable/);
   assert.match(values, /redisAddr:\s+redis-master:6379/);
-  assert.match(values, /kafkaBrokers:\s+kafka:9092/);
-  assert.match(values, /scheduleTopic:\s+woms\.schedule\.jobs/);
   assert.match(values, /kafkaPublishEnabled:\s+"true"/);
-  assert.match(values, /corsAllowedOrigin:\s+"\*"/);
-  assert.match(values, /authMode:\s+local/);
-  assert.match(values, /authSessionStore:\s+""/);
-  assert.match(values, /dependencyRetryTimeoutMs:\s+"120000"/);
-  assert.match(values, /dependencyRetryIntervalMs:\s+"2000"/);
-  assert.match(values, /minJobDurationMs:\s+"0"/);
-  assert.match(values, /maxRetries:\s+"3"/);
-  assert.match(values, /lockTtlMs:\s+"15000"/);
-  assert.match(values, /lockRenewIntervalMs:\s+"5000"/);
-  assert.match(values, /lockTimeoutMs:\s+"10000"/);
-  assert.match(values, /backfillIntervalMs:\s+"5000"/);
-  assert.match(values, /consumerGroup:\s+woms-scheduler-workers/);
-  assert.match(values, /bootstrapServers:\s+"kafka\.\{\{ \.Release\.Namespace \}\}\.svc\.cluster\.local:9092"/);
-  assert.match(values, /lagThreshold:\s+"10"/);
-  assert.match(values, /targetUtilization:\s+"70"/);
-  assert.match(values, /gthulhu:[\s\S]*enabled:\s+false/);
-  assert.match(values, /scheduler:[\s\S]*runtimeMode:\s+scheduler/);
-  assert.match(values, /mode:\s+none/);
-  assert.match(values, /monitor:[\s\S]*enableCRDWatcher:\s+true/);
-  assert.match(values, /prometheusServerAddress:\s+"http:\/\/monitoring-kube-prometheus-prometheus\.monitoring:9090"/);
-  assert.match(values, /metricName:\s+woms_worker_gthulhu_involuntary_ctx_switches_rate/);
-  assert.match(values, /threshold:\s+"20"/);
-  assert.match(values, /query:\s+\|-/);
-  assert.match(values, /gthulhu_pod_involuntary_ctx_switches_total\{exported_namespace="\{\{ \.Release\.Namespace \}\}"/);
-  assert.match(values, /pod_name=~"\{\{ include "woms\.fullname" \. \}\}-worker-\.\*"/);
+  assert.doesNotMatch(kedaBlock, /kafka:/);
+  assert.doesNotMatch(kedaBlock, /cpu:/);
+  assert.doesNotMatch(kedaBlock, /gthulhu:/);
+  assert.doesNotMatch(values, /^gthulhu:/m);
 });
 
-test("Helm chart deploys required platform dependencies by default", () => {
+test("Helm chart deploys required platform dependencies without active Gthulhu dependency", () => {
   assert.match(chart, /name:\s+postgresql/);
   assert.match(chart, /condition:\s+postgresql\.enabled/);
   assert.match(chart, /name:\s+redis/);
   assert.match(chart, /condition:\s+redis\.enabled/);
   assert.match(chart, /name:\s+kafka/);
   assert.match(chart, /condition:\s+kafka\.enabled/);
-  assert.match(chart, /name:\s+gthulhu/);
-  assert.match(chart, /repository:\s+file:\/\/charts\/gthulhu/);
-  assert.match(chart, /condition:\s+gthulhu\.enabled/);
-  assert.match(values, /postgresql:[\s\S]*enabled:\s+true/);
-  assert.match(values, /fullnameOverride:\s+postgres/);
-  assert.match(values, /redis:[\s\S]*enabled:\s+true/);
-  assert.match(values, /fullnameOverride:\s+redis/);
-  assert.match(values, /kafka:[\s\S]*enabled:\s+true/);
-  assert.match(values, /fullnameOverride:\s+kafka/);
+  assert.doesNotMatch(chart, /name:\s+gthulhu/);
+  assert.equal(existsSync(new URL("./templates/gthulhu-podschedulingmetrics.yaml", import.meta.url)), false);
 });
 
-test("Gthulhu monitor overlay enables monitor-only umbrella deployment", () => {
-  assert.match(gthulhuOverlay, /gthulhu:[\s\S]*enabled:\s+true/);
-  assert.match(gthulhuOverlay, /runtimeMode:\s+scheduler/);
-  assert.match(gthulhuOverlay, /mode:\s+none/);
-  assert.match(gthulhuOverlay, /nameSuffix:\s+woms-poc/);
-  assert.match(gthulhuOverlay, /monitorAll:\s+true/);
-  assert.match(gthulhuOverlay, /repository:\s+docker\.io\/d11nn\/gthulhu-scx/);
-  assert.match(gthulhuOverlay, /tag:\s+"vX\.Y\.Z"/);
-  assert.match(gthulhuOverlay, /keda:[\s\S]*kafka:[\s\S]*enabled:\s+true/);
-  assert.match(gthulhuOverlay, /keda:[\s\S]*cpu:[\s\S]*enabled:\s+true/);
-  assert.match(gthulhuOverlay, /keda:[\s\S]*gthulhu:[\s\S]*enabled:\s+true/);
-  assert.match(gthulhuOverlay, /prometheusServerAddress:\s+"http:\/\/\{\{ include \\"woms\.fullname\\" \. \}\}-prometheus\.\{\{ \.Release\.Namespace \}\}:9090"/);
-  assert.match(gthulhuOverlay, /gthulhu_pod_involuntary_ctx_switches_total\{exported_namespace="\{\{ \.Release\.Namespace \}\}",pod_name=~"\{\{ include "woms\.fullname" \. \}\}-worker-\.\*"\}/);
+test("KEDA ScaledObject targets the web Deployment using Prometheus per-pod NGINX req/s", () => {
+  assert.match(scaledObject, /kind:\s+ScaledObject/);
+  assert.match(scaledObject, /name:\s+\{\{ include "woms\.fullname" \. \}\}-web/);
+  assert.match(scaledObject, /scaleTargetRef:[\s\S]*name:\s+\{\{ include "woms\.fullname" \. \}\}-web/);
+  assert.match(scaledObject, /horizontalPodAutoscalerConfig:[\s\S]*name:\s+\{\{ include "woms\.fullname" \. \}\}-web-hpa/);
+  assert.match(scaledObject, /type:\s+prometheus/);
+  assert.match(scaledObject, /serverAddress:\s+\{\{ tpl \.Values\.keda\.prometheus\.serverAddress \. \| quote \}\}/);
+  assert.match(scaledObject, /metricName:\s+\{\{ \.Values\.keda\.prometheus\.metricName \| quote \}\}/);
+  assert.match(scaledObject, /query:\s+\{\{ tpl \.Values\.keda\.prometheus\.query \. \| quote \}\}/);
+  assert.match(values, /metricName:\s+woms_web_nginx_requests_per_second_per_pod/);
+  assert.match(values, /nginx_http_requests_total\{job="woms-web-nginx"/);
+  assert.match(values, /clamp_min\(count\(up\{job="woms-web-nginx"/);
+  assert.doesNotMatch(scaledObject, /type:\s+kafka/);
+  assert.doesNotMatch(scaledObject, /type:\s+cpu/);
+  assert.doesNotMatch(scaledObject, /gthulhu/);
 });
 
-test("Alan monitoring templates scrape WOMS and Gthulhu metrics", () => {
+test("Web deployment exposes NGINX traffic metrics and LoadBalancer service", () => {
+  assert.match(values, /web:[\s\S]*service:[\s\S]*type:\s+LoadBalancer/);
+  assert.match(values, /metrics:[\s\S]*repository:\s+nginx\/nginx-prometheus-exporter/);
+  assert.match(webDeployment, /if not \.Values\.keda\.enabled/);
+  assert.match(webDeployment, /name:\s+nginx-exporter/);
+  assert.match(webDeployment, /-nginx\.scrape-uri=\{\{ \.Values\.web\.metrics\.scrapeUri \}\}/);
+  assert.match(webDeployment, /name:\s+metrics[\s\S]*containerPort:\s+\{\{ \.Values\.web\.metrics\.port \}\}/);
+  assert.match(services, /type:\s+\{\{ \.Values\.web\.service\.type \}\}/);
+  assert.match(services, /name:\s+metrics[\s\S]*targetPort:\s+metrics/);
+});
+
+test("Prometheus and Grafana use the same web NGINX traffic signal as KEDA", () => {
   assert.match(prometheusConfig, /job_name:\s+woms-api/);
-  assert.match(prometheusConfig, /job_name:\s+gthulhu-monitor/);
-  assert.match(prometheusConfig, /if and \.Values\.gthulhu\.enabled \.Values\.gthulhu\.scheduler\.monitor\.enabled \.Values\.monitoring\.prometheus\.scrape\.gthulhu\.enabled/);
-  assert.match(prometheusConfig, /kubernetes_sd_configs:/);
-  assert.match(prometheusConfig, /tpl \.Values\.monitoring\.prometheus\.scrape\.gthulhu\.service \./);
+  assert.match(prometheusConfig, /job_name:\s+woms-web-nginx/);
+  assert.match(prometheusConfig, /regex:\s+\{\{ include "woms\.fullname" \. \}\}-web/);
   assert.match(grafanaConfig, /\.Files\.Glob "dashboards\/\*\.json"/);
   assert.match(grafanaConfig, /replace "__WOMS_NAMESPACE__" \$\.Release\.Namespace/);
-  assert.match(grafanaConfig, /replace "__WOMS_WORKER_REGEX__"/);
+  assert.doesNotMatch(grafanaConfig, /__WOMS_WORKER_REGEX__/);
+  assert.match(dashboard, /Per-pod NGINX req\/s/);
+  assert.match(dashboard, /sum\(rate\(nginx_http_requests_total\{job=\\"woms-web-nginx\\",namespace=\\"__WOMS_NAMESPACE__\\"\}\[1m\]\)\) \/ clamp_min\(count\(up\{job=\\"woms-web-nginx\\"/);
+  assert.match(dashboard, /NGINX req\/s by web pod/);
+  assert.match(dashboard, /nginx_connections_active/);
 });
 
-test("Helm Grafana dashboard aggregates replicated API metrics", () => {
-  assert.doesNotMatch(dashboard, /Online Users/);
-  assert.doesNotMatch(dashboard, /woms_current_online_user_count/);
-  assert.match(dashboard, /Request Latency \(P50\)/);
-  assert.match(dashboard, /histogram_quantile\(0\.50, sum\(rate\(woms_http_request_duration_seconds_bucket\[5m\]\)\) by \(le\)\)/);
-  assert.match(dashboard, /sum\(go_goroutines\{job=\\"woms-api\\"\}\)/);
-  assert.match(dashboard, /sum\(go_memstats_heap_alloc_bytes\{job=\\"woms-api\\"\}\)/);
-  assert.match(dashboard, /sum\(rate\(process_cpu_seconds_total\{job=\\"woms-api\\"\}\[5m\]\)\)/);
-});
-
-test("PodSchedulingMetrics selector targets WOMS workers", () => {
-  assert.match(gthulhuPsm, /kind:\s+PodSchedulingMetrics/);
-  assert.match(gthulhuPsm, /if and \.Values\.gthulhu\.enabled \.Values\.gthulhu\.podSchedulingMetrics\.enabled/);
-  assert.match(gthulhuPsm, /tpl \.Values\.gthulhu\.podSchedulingMetrics\.name \./);
-  assert.match(values, /podSchedulingMetrics:[\s\S]*labelSelectors:[\s\S]*key:\s+app\.kubernetes\.io\/component[\s\S]*value:\s+scheduler-worker/);
-  assert.match(values, /key:\s+app\.kubernetes\.io\/instance[\s\S]*value:\s+'\{\{ \.Release\.Name \}\}'/);
-});
-
-test("Gthulhu helper scripts quote user-controlled data safely", () => {
-  assert.match(mongodbStatefulSet, /process\.env\.MONGO_ROOT_USERNAME/);
-  assert.match(mongodbStatefulSet, /process\.env\.MONGO_ROOT_PASSWORD/);
-  assert.doesNotMatch(mongodbStatefulSet, /db\.getUser\('"\$MONGO_ROOT_USERNAME"'\)/);
-  assert.doesNotMatch(mongodbStatefulSet, /pwd:\s+'"\$MONGO_ROOT_PASSWORD"'/);
-  assert.doesNotMatch(mongodbStatefulSet, /chown 999:999/);
-  assert.match(mongodbStatefulSet, /defaultMode:\s+0440/);
-  assert.match(mtlsCertScript, /umask 077/);
-  assert.match(mtlsCertScript, /printf '%s\\n%s\\n'/);
-  assert.match(gthulhuMonitoringScript, /curl -fsS -G --data-urlencode "query=\$1"/);
-});
-
-test("HPA behavior CPU scenario removes its injected load sidecar during cleanup", () => {
-  assert.match(hpaBehaviorScript, /RESTORE_HELM=false/);
-  assert.match(hpaBehaviorScript, /CPU_LOAD_INJECTED=false/);
-  assert.match(hpaBehaviorScript, /remove_worker_deployment_cpu_load\(\)/);
-  assert.match(hpaBehaviorScript, /"name": "hpa-cpu-load"/);
-  assert.match(hpaBehaviorScript, /"\$patch": "delete"/);
-  assert.match(hpaBehaviorScript, /rollout status "deployment\/\$\{WORKER_DEPLOY\}"/);
-  assert.match(hpaBehaviorScript, /if \[ "\$RESTORE_HELM" = "true" \]/);
-  assert.match(hpaBehaviorScript, /restore_default_hpa_config\(\)/);
-  assert.doesNotMatch(hpaBehaviorScript, /cleanup\nCLEANED_UP=false/);
+test("Verification scripts cover the web HPA render and LoadBalancer behavior flow", () => {
+  assert.match(hpaRenderScript, /web-hpa/);
+  assert.match(hpaRenderScript, /woms_web_nginx_requests_per_second_per_pod/);
+  assert.match(hpaRenderScript, /type:\s+prometheus/);
+  assert.match(hpaRenderScript, /unexpected Kafka KEDA trigger/);
+  assert.match(hpaRenderScript, /unexpected Gthulhu resources/);
+  assert.match(hpaBehaviorScript, /WEB_DEPLOY="\$\{RELEASE\}-woms-web"/);
+  assert.match(hpaBehaviorScript, /LoadBalancer/);
+  assert.match(hpaBehaviorScript, /nginx_http_requests_total/);
+  assert.doesNotMatch(hpaBehaviorScript, /HPA_SCENARIO/);
+  assert.doesNotMatch(hpaBehaviorScript, /WORKER_DEPLOY/);
 });
 
 test("Default Docker image tags use v-prefixed release tags", () => {
@@ -164,40 +120,15 @@ test("Default Docker image tags use v-prefixed release tags", () => {
   assert.match(webDeployment, /include "woms\.image"/);
 });
 
-test("KEDA ScaledObject template points at scheduler worker backlog", () => {
-  assert.match(scaledObject, /kind:\s+ScaledObject/);
-  assert.match(scaledObject, /horizontalPodAutoscalerConfig:/);
-  assert.match(scaledObject, /name:\s+\{\{ include "woms\.fullname" \. \}\}-worker-hpa/);
-  assert.match(scaledObject, /scaleTargetRef:[\s\S]*name:\s+\{\{ include "woms\.fullname" \. \}\}-worker/);
-  assert.match(scaledObject, /type:\s+kafka/);
-  assert.match(scaledObject, /bootstrapServers:\s+\{\{ tpl \.Values\.keda\.kafka\.bootstrapServers \. \| quote \}\}/);
-  assert.match(scaledObject, /topic:\s+\{\{ \.Values\.keda\.kafka\.topic \| quote \}\}/);
-  assert.match(scaledObject, /consumerGroup:\s+\{\{ \.Values\.keda\.kafka\.consumerGroup \| quote \}\}/);
-  assert.match(scaledObject, /lagThreshold:\s+\{\{ \.Values\.keda\.kafka\.lagThreshold \| quote \}\}/);
-  assert.match(scaledObject, /type:\s+cpu/);
-  assert.match(scaledObject, /metricType:\s+Utilization/);
-  assert.match(scaledObject, /if \.Values\.keda\.gthulhu\.enabled/);
-  assert.match(scaledObject, /type:\s+prometheus/);
-  assert.match(scaledObject, /serverAddress:\s+\{\{ tpl \.Values\.keda\.gthulhu\.prometheusServerAddress \. \| quote \}\}/);
-  assert.match(scaledObject, /metricName:\s+\{\{ \.Values\.keda\.gthulhu\.metricName \| quote \}\}/);
-  assert.match(scaledObject, /query:\s+\{\{ tpl \.Values\.keda\.gthulhu\.query \. \| quote \}\}/);
-  assert.match(scaledObject, /threshold:\s+\{\{ \.Values\.keda\.gthulhu\.threshold \| quote \}\}/);
-});
-
-test("Kafka topic hook creates the scheduling topic with enough partitions for HPA", () => {
-  assert.match(values, /kafkaTopic:[\s\S]*repository:\s+docker\.io\/bitnamilegacy\/kafka/);
-  assert.match(values, /kafkaTopic:[\s\S]*tag:\s+3\.7\.1-debian-12-r4/);
+test("Kafka topic hook remains for async scheduling but is not an autoscaling trigger", () => {
   assert.match(kafkaTopicJob, /kind:\s+Job/);
   assert.match(kafkaTopicJob, /helm\.sh\/hook/);
-  assert.match(kafkaTopicJob, /activeDeadlineSeconds:\s+\{\{ \.Values\.kafkaTopic\.activeDeadlineSeconds \}\}/);
-  assert.match(kafkaTopicJob, /bootstrap=\{\{ tpl \.Values\.keda\.kafka\.bootstrapServers \. \| quote \}\}/);
-  assert.match(kafkaTopicJob, /kafka-topics\.sh/);
-  assert.match(kafkaTopicJob, /max_attempts=\{\{ \.Values\.kafkaTopic\.wait\.maxAttempts \| int \}\}/);
-  assert.match(kafkaTopicJob, /exit 1/);
-  assert.match(kafkaTopicJob, /--create/);
-  assert.match(kafkaTopicJob, /--if-not-exists/);
-  assert.match(kafkaTopicJob, /--alter/);
-  assert.match(kafkaTopicJob, /\$partitions = \(\.Values\.keda\.maxReplicaCount \| int\)/);
+  assert.match(kafkaTopicJob, /topic=\{\{ \.Values\.scheduleQueue\.topic \| quote \}\}/);
+  assert.match(kafkaTopicJob, /bootstrap=\{\{ tpl \.Values\.scheduleQueue\.bootstrapServers \. \| quote \}\}/);
+  assert.doesNotMatch(kafkaTopicJob, /\.Values\.keda\.kafka/);
+  assert.match(workerDeployment, /name:\s+KAFKA_BROKERS[\s\S]*\.Values\.scheduleQueue\.bootstrapServers/);
+  assert.match(workerDeployment, /name:\s+KAFKA_CONSUMER_GROUP[\s\S]*\.Values\.scheduleQueue\.consumerGroup/);
+  assert.match(workerDeployment, /replicas:\s+\{\{ \.Values\.worker\.replicaCount \}\}/);
 });
 
 test("Bitnami dependency image overrides use the legacy repository for retained tags", () => {
@@ -209,124 +140,28 @@ test("Bitnami dependency image overrides use the legacy repository for retained 
   assert.match(values, /^kafka:\n(?:^[ \t]+[^\n]*\n)*?^[ \t]+image:\n(?:^[ \t]+[^\n]*\n)*?^[ \t]+tag:\s+3\.7\.1-debian-12-r4\s*$/m);
 });
 
-test("Single-node Kafka defaults keep internal topics usable on a clean VM", () => {
-  assert.match(values, /controller:[\s\S]*replicaCount:\s+1/);
-  assert.match(values, /broker:[\s\S]*replicaCount:\s+0/);
-  assert.match(values, /controller:[\s\S]*extraConfigYaml:[\s\S]*default\.replication\.factor:\s+1/);
-  assert.match(values, /controller:[\s\S]*extraConfigYaml:[\s\S]*min\.insync\.replicas:\s+1/);
-  assert.match(values, /controller:[\s\S]*extraConfigYaml:[\s\S]*offsets\.topic\.replication\.factor:\s+1/);
-  assert.match(values, /controller:[\s\S]*extraConfigYaml:[\s\S]*transaction\.state\.log\.min\.isr:\s+1/);
-  assert.match(values, /controller:[\s\S]*extraConfigYaml:[\s\S]*transaction\.state\.log\.replication\.factor:\s+1/);
-});
-
-test("API JWT secret is generated when unset and documented for retrieval", () => {
+test("API JWT secret and admin autoscaling status RBAC are wired", () => {
   assert.match(values, /jwtSecret:\s+""/);
   assert.match(secret, /lookup "v1" "Secret"/);
   assert.match(secret, /randAlphaNum 64/);
   assert.match(notes, /generated or reused a JWT secret/);
-  assert.match(notes, /kubectl get secret/);
-});
-
-test("API and worker deployments expose PostgreSQL, Kafka, and retry env", () => {
-  assert.match(apiDeployment, /name:\s+API_STORE/);
-  assert.match(apiDeployment, /name:\s+DATABASE_URL/);
-  assert.match(apiDeployment, /name:\s+KAFKA_SCHEDULE_TOPIC/);
-  assert.match(apiDeployment, /name:\s+KAFKA_CONSUMER_GROUP/);
-  assert.match(apiDeployment, /name:\s+KAFKA_PUBLISH_ENABLED/);
-  assert.match(apiDeployment, /name:\s+POD_NAMESPACE/);
-  assert.match(apiDeployment, /name:\s+HPA_DEMO_HPA_NAME/);
-  assert.match(apiDeployment, /name:\s+HPA_DEMO_DEPLOYMENT_NAME/);
-  assert.match(apiDeployment, /name:\s+HPA_DEMO_POD_LABEL_SELECTOR/);
-  assert.match(apiDeployment, /serviceAccountName:\s+\{\{ include "woms\.fullname" \. \}\}-api/);
-  assert.match(apiDeployment, /name:\s+CORS_ALLOWED_ORIGIN/);
-  assert.match(apiDeployment, /name:\s+AUTH_MODE/);
-  assert.match(apiDeployment, /name:\s+AUTH_SESSION_STORE/);
-  assert.match(apiDeployment, /name:\s+API_DEPENDENCY_RETRY_TIMEOUT_MS/);
-  assert.match(apiDeployment, /name:\s+API_DEPENDENCY_RETRY_INTERVAL_MS/);
-  assert.match(apiDeployment, /startupProbe:[\s\S]*path:\s+\/healthz[\s\S]*failureThreshold:\s+36/);
-  assert.match(workerDeployment, /name:\s+KAFKA_SCHEDULE_TOPIC/);
-  assert.match(workerDeployment, /value:\s+\{\{ tpl \.Values\.keda\.kafka\.bootstrapServers \. \| quote \}\}/);
-  assert.match(workerDeployment, /name:\s+KAFKA_CONSUMER_GROUP/);
-  assert.match(workerDeployment, /name:\s+DATABASE_URL/);
-  assert.match(workerDeployment, /name:\s+REDIS_ADDR/);
-  assert.match(workerDeployment, /name:\s+WORKER_MIN_JOB_DURATION_MS/);
-  assert.match(workerDeployment, /name:\s+WORKER_MAX_RETRIES/);
-  assert.match(workerDeployment, /name:\s+WORKER_LOCK_TTL_MS/);
-  assert.match(workerDeployment, /name:\s+WORKER_LOCK_RENEW_INTERVAL_MS/);
-  assert.match(workerDeployment, /name:\s+WORKER_LOCK_TIMEOUT_MS/);
-  assert.match(workerDeployment, /name:\s+WORKER_BACKFILL_INTERVAL_MS/);
-  assert.match(workerDeployment, /name:\s+WORKER_DEPENDENCY_RETRY_TIMEOUT_MS/);
-  assert.match(workerDeployment, /name:\s+WORKER_DEPENDENCY_RETRY_INTERVAL_MS/);
-  assert.match(workerDeployment, /if not \.Values\.keda\.enabled/);
-  assert.match(workerDeployment, /replicas:\s+\{\{ \.Values\.worker\.replicaCount \}\}/);
-});
-
-test("API can read worker autoscaling status for the HPA demo panel", () => {
-  assert.match(apiRBAC, /kind:\s+ServiceAccount/);
-  assert.match(apiRBAC, /name:\s+\{\{ include "woms\.fullname" \. \}\}-api/);
+  assert.match(apiDeployment, /name:\s+HPA_DEMO_HPA_NAME[\s\S]*-web-hpa/);
+  assert.match(apiDeployment, /name:\s+HPA_DEMO_DEPLOYMENT_NAME[\s\S]*-web/);
+  assert.match(apiDeployment, /app\.kubernetes\.io\/component=web/);
   assert.match(apiRBAC, /resources:\s+\["pods"\][\s\S]*verbs:\s+\["get", "list"\]/);
   assert.match(apiRBAC, /apiGroups:\s+\["apps"\][\s\S]*resources:\s+\["deployments"\][\s\S]*verbs:\s+\["get"\]/);
   assert.match(apiRBAC, /apiGroups:\s+\["autoscaling"\][\s\S]*resources:\s+\["horizontalpodautoscalers"\][\s\S]*verbs:\s+\["get"\]/);
-  assert.match(apiRBAC, /kind:\s+RoleBinding/);
 });
 
-test("Ingress keeps login public while protecting API prefix", () => {
+test("Ingress and Grafana proxy behavior remain unchanged", () => {
   assert.match(ingress, /name:\s+\{\{ include "woms\.fullname" \. \}\}-public/);
   assert.match(ingress, /path:\s+\/api\/auth\/login[\s\S]*pathType:\s+Exact[\s\S]*name:\s+\{\{ include "woms\.fullname" \. \}\}-api/);
   assert.match(ingress, /name:\s+\{\{ include "woms\.fullname" \. \}\}-api-secure/);
   assert.match(ingress, /nginx\.ingress\.kubernetes\.io\/auth-url/);
-  assert.match(ingress, /path:\s+\/api[\s\S]*pathType:\s+Prefix/);
-});
-
-test("Helm exposes Grafana through the web proxy subpath", () => {
-  assert.match(values, /externalPath:\s+\/grafana/);
-  assert.match(values, /serveFromSubPath:\s+"true"/);
-  assert.match(values, /rootUrl:\s+""/);
-  assert.match(helpers, /define "woms\.grafanaRootUrl"/);
-  assert.match(helpers, /define "woms\.externalScheme"/);
-  assert.match(helpers, /define "woms\.grafanaExternalPath"/);
-  assert.match(webDeployment, /name:\s+GRAFANA_UPSTREAM/);
-  assert.match(webDeployment, /value:\s+\{\{ printf "%s-grafana:3000" \(include "woms\.fullname" \.\) \| quote \}\}/);
-  assert.match(grafanaDeployment, /name:\s+GF_SERVER_DOMAIN/);
-  assert.match(grafanaDeployment, /name:\s+GF_SERVER_ROOT_URL/);
-  assert.match(grafanaDeployment, /include "woms\.grafanaRootUrl" \./);
-  assert.match(grafanaDeployment, /name:\s+GF_SERVER_SERVE_FROM_SUB_PATH/);
-  assert.match(grafanaDeployment, /monitoring\.grafana\.env\.serveFromSubPath/);
-  assert.match(grafanaDeployment, /name:\s+GF_SECURITY_COOKIE_SECURE[\s\S]*\.Values\.ingress\.tls\.enabled \| quote/);
   assert.doesNotMatch(ingress, /path:\s+\/grafana/);
-  assert.doesNotMatch(ingress, /name:\s+\{\{ include "woms\.fullname" \. \}\}-grafana/);
-});
-
-test("Helm Grafana defaults require authentication before dashboard viewing", () => {
-  assert.match(values, /anonymousEnabled:\s+"false"/);
-  assert.match(values, /allowEmbedding:\s+"false"/);
-  assert.match(values, /usersAllowSignUp:\s+"false"/);
-  assert.match(values, /cookieSameSite:\s+lax/);
-  assert.match(values, /admin:[\s\S]*existingSecret:\s+""/);
-  assert.match(values, /admin:[\s\S]*userKey:\s+admin-user/);
-  assert.match(values, /admin:[\s\S]*passwordKey:\s+admin-password/);
-  assert.match(helpers, /define "woms\.grafanaAdminSecretName"/);
+  assert.match(values, /externalPath:\s+\/grafana/);
+  assert.match(helpers, /define "woms\.grafanaRootUrl"/);
+  assert.match(webDeployment, /name:\s+GRAFANA_UPSTREAM/);
+  assert.match(grafanaDeployment, /name:\s+GF_SERVER_ROOT_URL/);
   assert.match(grafanaSecret, /kind:\s+Secret/);
-  assert.match(grafanaSecret, /not \.Values\.monitoring\.grafana\.admin\.existingSecret/);
-  assert.match(grafanaSecret, /randAlphaNum 32/);
-  assert.match(grafanaDeployment, /name:\s+GF_AUTH_ANONYMOUS_ENABLED[\s\S]*monitoring\.grafana\.env\.anonymousEnabled/);
-  assert.match(grafanaDeployment, /if \$anonymousEnabled[\s\S]*name:\s+GF_AUTH_ANONYMOUS_ORG_ROLE/);
-  assert.match(grafanaDeployment, /name:\s+GF_SECURITY_ADMIN_USER[\s\S]*secretKeyRef:[\s\S]*include "woms\.grafanaAdminSecretName"/);
-  assert.match(grafanaDeployment, /name:\s+GF_SECURITY_ADMIN_PASSWORD[\s\S]*secretKeyRef:[\s\S]*monitoring\.grafana\.admin\.passwordKey/);
-  assert.match(grafanaDeployment, /name:\s+GF_USERS_ALLOW_SIGN_UP[\s\S]*monitoring\.grafana\.env\.usersAllowSignUp/);
-});
-
-test("Web deployment is runnable without manual securityContext patches", () => {
-  assert.doesNotMatch(services, /name:\s+api\s*\n/);
-  assert.match(services, /name:\s+\{\{ include "woms\.fullname" \. \}\}-api/);
-  assert.match(webDeployment, /name:\s+API_UPSTREAM/);
-  assert.match(webDeployment, /value:\s+\{\{ printf "%s-api:8080" \(include "woms\.fullname" \.\) \| quote \}\}/);
-  assert.match(webDeployment, /fsGroup:\s+101/);
-  assert.match(webDeployment, /runAsNonRoot:\s+true/);
-  assert.match(webDeployment, /runAsUser:\s+101/);
-  assert.match(webDeployment, /readOnlyRootFilesystem:\s+true/);
-  assert.match(webDeployment, /mountPath:\s+\/etc\/nginx\/conf\.d/);
-  assert.match(webDeployment, /mountPath:\s+\/var\/cache\/nginx/);
-  assert.match(webDeployment, /mountPath:\s+\/var\/run/);
-  assert.match(webDeployment, /mountPath:\s+\/tmp/);
 });

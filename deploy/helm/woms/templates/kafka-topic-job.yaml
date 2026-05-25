@@ -1,7 +1,7 @@
-{{- if and .Values.kafkaTopic.enabled .Values.keda.kafka.enabled }}
+{{- if .Values.kafkaTopic.enabled }}
 {{- $partitions := (.Values.kafkaTopic.partitions | int) }}
 {{- if lt $partitions 1 }}
-{{- $partitions = (.Values.keda.maxReplicaCount | int) }}
+{{- $partitions = (.Values.worker.replicaCount | int) }}
 {{- end }}
 apiVersion: batch/v1
 kind: Job
@@ -31,8 +31,8 @@ spec:
             - /bin/sh
             - -ec
             - |
-              topic={{ .Values.keda.kafka.topic | quote }}
-              bootstrap={{ tpl .Values.keda.kafka.bootstrapServers . | quote }}
+              topic={{ .Values.scheduleQueue.topic | quote }}
+              bootstrap={{ tpl .Values.scheduleQueue.bootstrapServers . | quote }}
               partitions={{ $partitions }}
               replication={{ .Values.kafkaTopic.replicationFactor | int }}
               max_attempts={{ .Values.kafkaTopic.wait.maxAttempts | int }}

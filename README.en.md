@@ -38,10 +38,10 @@ flowchart LR
   Kafka --> Worker[Go Scheduler Worker]
   Worker --> Redis
   Worker --> DB
-  Gthulhu[Gthulhu Monitor Optional] -. observes pod scheduling .-> Worker
-  Gthulhu -. pod metrics .-> Prometheus[(Prometheus Optional)]
-  Prometheus -. optional trigger .-> KEDA
-  KEDA[KEDA ScaledObject Kafka + CPU + optional Prometheus] --> Worker
+  LB[GKE LoadBalancer] --> Web
+  Web -. NGINX metrics .-> Prometheus[(Prometheus / Grafana)]
+  Prometheus -. per-pod NGINX req/s .-> KEDA
+  KEDA[KEDA ScaledObject Prometheus trigger] --> Web
 ```
 
 ### Request And Scaling Flow
@@ -49,16 +49,16 @@ flowchart LR
 1. Users access the static web UI through NGINX Ingress or a forwarded local port.
 2. The web UI calls the Go API. The API validates JWT/RBAC, reads and writes PostgreSQL, uses Redis for scheduling locks, and publishes schedule jobs to Kafka.
 3. Scheduler workers consume `woms.schedule.jobs` as the `woms-scheduler-workers` consumer group, compute deterministic allocations, update PostgreSQL, and write audit records.
-4. KEDA scales the worker deployment from the existing WOMS `ScaledObject`. Kafka lag is the primary trigger, CPU utilization is the secondary trigger, and Gthulhu can optionally add one Prometheus trigger for pod scheduling pressure.
-5. The WOMS chart can optionally deploy the vendored `gthulhu` subchart in monitor-only mode. Gthulhu observes worker pods, the bundled or Alan Prometheus scrape target reads `/metrics` from `woms-gthulhu-scheduler-sidecar:9090`, and WOMS reads that Prometheus query through KEDA.
+4. KEDA scales the web deployment from the WOMS `ScaledObject`. The active trigger is a Prometheus query for per-pod NGINX request rate from the web pods.
+5. The same `woms_web_nginx_requests_per_second_per_pod` signal is used by KEDA, Prometheus, and Grafana for the GKE LoadBalancer traffic demo.
 
 ### Deployable Units
 
 - `web`: vanilla HTML/CSS/JS frontend served by NGINX.
 - `api`: Go REST API for JWT, RBAC, orders, schedule preview, schedule jobs, production confirmation, and audit logs.
 - `scheduler-worker`: Go worker, prepared for Kafka consumer scheduling jobs.
-- `deploy/helm/woms`: Kubernetes Helm chart for API, worker, web, Ingress, KEDA, Prometheus/Grafana, and the optional `gthulhu` subchart.
-- Optional Gthulhu integration: `gthulhu.enabled=false` by default. Use `deploy/helm/woms/values-gthulhu-monitor.yaml` to enable monitor-only Gthulhu, the worker `PodSchedulingMetrics` selector, Alan-compatible Prometheus/Grafana wiring, and the third KEDA Prometheus trigger.
+- `deploy/helm/woms`: Kubernetes Helm chart for API, worker, web, Ingress, KEDA, Prometheus/Grafana, and the web NGINX metrics exporter.
+- Historical Gthulhu notes remain under `docs/`, but the active chart no longer deploys the Gthulhu subchart or worker Kafka/CPU/Gthulhu KEDA triggers.
 
 ## Prerequisites
 
@@ -73,8 +73,8 @@ Install these tools first:
 - A Kubernetes cluster, such as Docker Desktop Kubernetes, kind, minikube, or cloud K8s
 - NGINX Ingress Controller
 - KEDA
-- metrics-server, required for CPU autoscaling verification
-- Optional for Gthulhu scheduling-pressure autoscaling: a Gthulhu monitor image built from `/home/ubuntu/Gthulhu` and Prometheus/Grafana, either bundled by this chart or supplied by Alan/kube-prometheus-stack
+- A GKE cluster or equivalent Kubernetes LoadBalancer environment for the web traffic autoscaling demo
+- Prometheus/Grafana and KEDA from this chart for the web NGINX request-rate trigger
 
 Check your tools:
 
@@ -208,11 +208,11 @@ docker build -f Dockerfile.web -t woms-web:local .
 
 ## Kubernetes Deployment
 
-Make sure the cluster has KEDA and metrics-server installed first. NGINX Ingress is required only when `ingress.enabled=true`.
+Make sure the cluster has KEDA installed first. NGINX Ingress is required only when `ingress.enabled=true`; the web traffic demo also needs a LoadBalancer-capable cluster.
 
 A clean VM deployment should have two layers:
 
-1. Platform setup: Kubernetes, metrics-server, and KEDA. For the optional Gthulhu trigger, also install Gthulhu and Prometheus first.
+1. Platform setup: Kubernetes, KEDA, and LoadBalancer support for the web traffic demo.
 2. WOMS deployment: Helm installs the API, web, scheduler worker, Services, optional Ingress, KEDA ScaledObject, and the PostgreSQL, Redis, and Kafka chart dependencies.
 
 Users should not manually patch the web deployment, create Kafka topics, or tune topic partitions. Those operational details must be handled by the image, Helm chart, or platform bootstrap.
@@ -224,7 +224,7 @@ sudo snap install microk8s --classic --channel=1.35/stable
 sudo usermod -aG microk8s "$USER"
 newgrp microk8s
 microk8s status --wait-ready
-microk8s enable dns hostpath-storage metrics-server
+microk8s enable dns hostpath-storage
 microk8s enable community
 microk8s enable keda
 microk8s kubectl get node
@@ -287,7 +287,7 @@ API and scheduler-worker containers use bounded startup retry/backoff for Postgr
 
 The chart pins the Bitnami dependency image tags used by the dependency chart versions. Docker Hub no longer serves those retained tags from `bitnami/*`, so the default values override PostgreSQL, Redis, Kafka, and the Kafka topic hook to `bitnamilegacy/*`.
 
-For the single-node MicroK8s demo, the chart also sets Kafka internal topic replication values to `1`, including `offsets.topic.replication.factor`. Without that, `__consumer_offsets` defaults to replication factor `3`, the scheduler worker cannot create `woms-scheduler-workers`, and KEDA cannot read the Kafka lag metric.
+For the single-node MicroK8s demo, the chart also sets Kafka internal topic replication values to `1`, including `offsets.topic.replication.factor`. Without that, `__consumer_offsets` defaults to replication factor `3`, and the scheduler worker cannot create `woms-scheduler-workers` reliably.
 
 If a previous install exists, Bitnami dependencies can require existing generated passwords during `helm upgrade`. For a clean VM demo, remove the old release and PVCs intentionally before reinstalling. For a real upgrade, follow the password hints printed by Helm and pass the existing secrets.
 
@@ -332,77 +332,38 @@ If the browser runs on a Windows host and WOMS runs on VM `192.168.56.101`, crea
 ssh -L 8081:127.0.0.1:8081 ubuntu@192.168.56.101
 ```
 
-### Scheduler Worker HPA Demo
+### Web Traffic HPA Demo
 
-The HPA scenario for WOMS is the scheduler-worker backlog. During end-of-day planning or rush-order recovery, the API publishes many scheduling jobs to Kafka topic `woms.schedule.jobs`. The scheduler workers share consumer group `woms-scheduler-workers`; when lag exceeds `keda.kafka.lagThreshold`, KEDA creates and drives the HPA named `woms-woms-worker-hpa` for deployment `woms-woms-worker`. CPU utilization is kept as a secondary trigger for compute-heavy scheduling bursts.
+The active HPA scenario for WOMS is GKE LoadBalancer traffic to the web pods. The web NGINX container exposes `stub_status` on `127.0.0.1`, a sidecar `nginx-prometheus-exporter` publishes `/metrics`, Prometheus scrapes the web Service `metrics` port, and KEDA scales `Deployment/woms-woms-web` with the same per-pod NGINX request-rate query shown in Grafana.
 
-Log in to the web UI as admin, open the "multi-line scheduling peak" panel, and click the peak creation button. The API clears old `L001-L200` data, creates 200 demo lines, 1,000 pending orders, and 400 scheduling jobs, then publishes them to Kafka topic `woms.schedule.jobs`. The demo creates multiple jobs per line so Redis line locks are exercised while workers consume the backlog with consumer group `woms-scheduler-workers`; the chart creates the topic automatically with a partition count no smaller than `keda.maxReplicaCount`, so HPA-created worker pods can consume in parallel.
+Default active target:
 
-Watch KEDA create the HPA and scale the worker:
+- Deployment: `woms-woms-web`
+- HPA: `woms-woms-web-hpa`
+- KEDA trigger: Prometheus
+- Metric: `woms_web_nginx_requests_per_second_per_pod`
+- Query: per-pod `rate(nginx_http_requests_total{job="woms-web-nginx"}[1m])`
+
+Watch the web HPA:
 
 ```bash
-kubectl get scaledobject,hpa,deploy,pod -n woms
-kubectl get hpa,deploy,pod -n woms -w
-kubectl describe hpa woms-woms-worker-hpa -n woms
-kubectl logs deploy/woms-woms-worker -n woms -f
+kubectl get scaledobject,hpa,deploy,pod,svc -n woms
+kubectl get hpa,deploy,pod -n woms -l app.kubernetes.io/component=web -w
+kubectl describe hpa woms-woms-web-hpa -n woms
 NAMESPACE=woms ./scripts/verify-k8s.sh
+./scripts/verify-hpa-render.sh
 ```
 
-`verify-k8s.sh` matches the default no-Ingress chart render. For an Ingress deployment, install with `--set ingress.enabled=true` and run `INGRESS_ENABLED=true NAMESPACE=woms ./scripts/verify-k8s.sh`.
-
-HPA does not create pods named `hpa-*`. It is an autoscaling resource that changes `Deployment/woms-woms-worker` replicas. A successful demo shows multiple `woms-woms-worker-*` pods, and `kubectl describe hpa woms-woms-worker-hpa -n woms` shows `SuccessfulRescale` events with the external metric above target.
-
-The chart also includes an optional Gthulhu monitor-only integration. `values.yaml` keeps `gthulhu.enabled=false` and `keda.gthulhu.enabled=false`; `deploy/helm/woms/values-gthulhu-monitor.yaml` enables the vendored `gthulhu` subchart, sets `scheduler.config.mode=none`, exposes `/metrics` on `woms-gthulhu-scheduler-sidecar:9090`, deploys a worker `PodSchedulingMetrics` selector, and adds one Prometheus trigger to the existing worker `ScaledObject`. The PoC overlay sets `scheduler.monitor.monitorAll=true` and uses a suffixed Gthulhu scheduler ConfigMap name so config changes are remounted cleanly. Kafka, CPU, and Gthulhu triggers have independent switches at `keda.kafka.enabled`, `keda.cpu.enabled`, and `keda.gthulhu.enabled`.
-
-Build Gthulhu verification images from the source repo and pass the tag at install time:
-
-When upgrading a VM that has already deployed an older Gthulhu integration, clear the old immutable scheduler ConfigMap before running Helm:
+The admin panel now describes the web traffic autoscaling demo. It does not create scheduler backlog. Use the GKE LoadBalancer address and a traffic tool such as `hey`:
 
 ```bash
-kubectl delete configmap woms-gthulhu-scheduler-config -n woms --ignore-not-found
+LB_IP="$(kubectl get svc woms-woms-web -n woms -o jsonpath='{.status.loadBalancer.ingress[0].ip}')"
+hey -z 5m -c 80 "http://${LB_IP}:8080/"
 ```
 
-```bash
-REGISTRY=docker.io/d11nn PUSH=true ./scripts/build-push-gthulhu-images.sh
-helm upgrade --install woms ./deploy/helm/woms \
-  --namespace woms --create-namespace \
-  -f ./deploy/helm/woms/values-gthulhu-monitor.yaml \
-  --set gthulhu.scheduler.image.tag=woms-integration-<gthulhu-short-sha> \
-  --set gthulhu.scheduler.sidecar.image.tag=woms-integration-<gthulhu-short-sha> \
-  --set gthulhu.manager.image.tag=woms-integration-<gthulhu-short-sha>
-```
+Open Grafana through `/grafana/` and inspect `WOMS web autoscaling`. The `Per-pod NGINX req/s` panel uses the same query as KEDA; during load, the per-pod request rate should rise, the HPA should increase web replicas, and the `NGINX req/s by web pod` panel should show traffic distributed across the new pods.
 
-If Docker Hub credentials are unavailable, use the MicroK8s registry instead:
-
-```bash
-REGISTRY=localhost:32000 PUSH=true ./scripts/build-push-gthulhu-images.sh
-helm upgrade --install woms ./deploy/helm/woms \
-  --namespace woms --create-namespace \
-  -f ./deploy/helm/woms/values-gthulhu-monitor.yaml \
-  --set gthulhu.scheduler.image.repository=localhost:32000/gthulhu-scx \
-  --set gthulhu.scheduler.image.tag=woms-integration-<gthulhu-short-sha> \
-  --set gthulhu.scheduler.sidecar.image.repository=localhost:32000/gthulhu-api \
-  --set gthulhu.scheduler.sidecar.image.tag=woms-integration-<gthulhu-short-sha> \
-  --set gthulhu.manager.image.repository=localhost:32000/gthulhu-api \
-  --set gthulhu.manager.image.tag=woms-integration-<gthulhu-short-sha>
-```
-
-Alan integration contract: scrape path `/metrics`, service `woms-gthulhu-scheduler-sidecar`, port `9090`. The dashboard includes `Worker Involuntary Context Switch Rate`, `Worker Run Queue Wait Time Rate`, and `Tracked Worker Process Count` panels. The bundled Prometheus target adds its own `namespace` label, so Gthulhu's original pod namespace is queried as `exported_namespace="woms"`.
-
-Verify each scaler path independently:
-
-```bash
-./scripts/verify-gthulhu-monitoring.sh
-HPA_SCENARIO=cpu ./scripts/verify-hpa-behavior.sh
-HPA_SCENARIO=kafka ./scripts/verify-hpa-behavior.sh
-HPA_SCENARIO=gthulhu ./scripts/verify-hpa-behavior.sh
-```
-
-`verify-hpa-behavior.sh` defaults `GTHULHU_IMAGE_TAG` to `woms-integration-f71f78a`; set `GTHULHU_IMAGE_TAG=woms-integration-<gthulhu-short-sha>` when validating a different image tag.
-
-For GKE Standard, keep Gthulhu on Linux node pools that allow the required eBPF/hostPID/privileged/hostPath settings, keep monitor-only mode unless scheduler handoff is explicitly approved, and use release image tags such as `vX.Y.Z` instead of verification tags.
-
-Before changing the Gthulhu branch or image used with WOMS, follow the [Gthulhu and WOMS deployment alignment guide](docs/gthulhu-woms-deployment.en.md). The validated WOMS PoC baseline is Gthulhu `d11nn/feat/woms-poc`; any newer upstream image must be rebuilt and revalidated before it can be treated as equivalent.
+Historical Gthulhu documentation remains in `docs/` for reference only. The active Helm chart no longer vendors or renders the Gthulhu chart, `PodSchedulingMetrics`, worker Kafka lag KEDA trigger, worker CPU trigger, or Gthulhu Prometheus trigger.
 
 ### API And Web High Availability Demo
 
@@ -434,7 +395,7 @@ GitHub Actions runs:
 - `gofmt` check
 - API, worker, and web Docker builds
 - Helm rendering
-- Scheduler worker HPA/KEDA render verification with `./scripts/verify-hpa-render.sh`
+- Web HPA/KEDA render verification with `./scripts/verify-hpa-render.sh`
 - Docker Hub push and tagging on `main`, `release/**`, or manual dispatch
 - Automatic Helm image tag update on `main`
 - Automatic Git tag creation on every successful `main` publish, using `v0.1.<run-number>` by default
@@ -474,6 +435,6 @@ Minimum completion criteria:
 - API without token returns `401`.
 - Sales calling scheduler APIs returns `403`.
 - Scheduler A cannot read or mutate Scheduler B line data.
-- `helm template` renders KEDA `ScaledObject` and PDBs by default; it renders Ingress when `ingress.enabled=true`.
-- Worker replicas scale up when Kafka lag increases and scale down after lag drains.
+- `helm template` renders the web KEDA `ScaledObject`, NGINX metrics exporter, LoadBalancer web Service, and PDBs by default; it renders Ingress when `ingress.enabled=true`.
+- Web replicas scale up when per-pod NGINX req/s rises and scale down after traffic drains and cooldown passes.
 - README, tests, commit, and push must be completed with every feature.

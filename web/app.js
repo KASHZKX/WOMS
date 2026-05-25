@@ -46,6 +46,7 @@ const state = {
   orders: [],
   calendarAllocations: [],
   preview: null,
+  previewCalendarMode: "pending",
   hpaPeak: null,
   productionOrderId: "",
   scheduleHistory: [],
@@ -189,20 +190,15 @@ document.getElementById("delete-user-button").addEventListener("click", async ()
 });
 
 document.getElementById("create-hpa-peak").addEventListener("click", async () => {
-  const ok = window.confirm("確定要建立 L001-L200 的多產線排程尖峰嗎？這會建立大量排程任務並可能觸發 worker 擴容。");
-  if (!ok) {
-    return;
-  }
   try {
-    renderHPAPeakLoading("正在建立 200 條 demo 產線、1,000 張待排程訂單與 400 個排程任務...");
+    renderHPAPeakLoading("正在讀取 web Deployment、HPA 與 pod 狀態...");
     const payload = await request("/api/demo/hpa-peak", { method: "POST" });
     state.hpaPeak = payload.summary;
     renderHPAPeakSummary();
     syncHPAPeakPolling();
-    showMessage("排程尖峰已建立", "多產線排程任務已送入背景佇列，請觀察 Kafka lag 與 worker HPA。");
-    await refreshWorkspace();
+    showMessage("web autoscaling demo 已載入", "請由 GKE LoadBalancer 送入多使用者流量，觀察 Grafana per-pod NGINX req/s 與 web HPA。");
   } catch (error) {
-    showMessage("排程尖峰建立失敗", error.message, "warn");
+    showMessage("autoscaling 狀態讀取失敗", error.message, "warn");
     await loadHPAPeakSummary();
   }
 });
@@ -212,22 +208,31 @@ document.getElementById("refresh-hpa-peak").addEventListener("click", async () =
 });
 
 document.getElementById("clear-hpa-peak").addEventListener("click", async () => {
-  const ok = window.confirm("確定要清除 L001-L200 的排程尖峰資料嗎？佇列中與執行中的任務會先取消。");
+  const ok = window.confirm("確定要清除舊版 L001-L200 排程尖峰資料嗎？web traffic autoscaling demo 本身不需要建立訂單或任務。");
   if (!ok) {
     return;
   }
   try {
-    renderHPAPeakLoading("正在取消任務並清除 L001-L200 的訂單、排程與紀錄...");
+    renderHPAPeakLoading("正在清除舊版 L001-L200 的訂單、排程與紀錄...");
     const payload = await request("/api/demo/hpa-peak", { method: "DELETE" });
     state.hpaPeak = payload.summary;
     renderHPAPeakSummary();
     syncHPAPeakPolling();
-    showMessage("排程尖峰已清除", "L001-L200 的排程尖峰資料已清除。");
+    showMessage("舊版資料已清除", "web autoscaling demo 請改用 LoadBalancer 壓測與 Grafana 指標觀察。");
     await refreshWorkspace();
   } catch (error) {
     showMessage("清除失敗", error.message, "warn");
     await loadHPAPeakSummary();
   }
+});
+
+document.getElementById("preview-calendar-mode").addEventListener("click", (event) => {
+  const mode = event.target.dataset.previewCalendarMode;
+  if (!mode) {
+    return;
+  }
+  state.previewCalendarMode = mode;
+  renderPreviewPage();
 });
 
 document.getElementById("preview-selected").addEventListener("click", async () => {
@@ -609,7 +614,10 @@ function isHPAPeakActive(summary) {
   if (!summary) {
     return false;
   }
-  return Number(summary.lineCount ?? 0) > 0 || Number(summary.orderCount ?? 0) > 0 || Number(summary.jobCount ?? 0) > 0;
+  return Boolean(summary.hpaName || summary.deploymentName || summary.metricName)
+    || Number(summary.lineCount ?? 0) > 0
+    || Number(summary.orderCount ?? 0) > 0
+    || Number(summary.jobCount ?? 0) > 0;
 }
 
 async function loadLines() {
@@ -729,7 +737,7 @@ function renderHPAPeakSummary() {
   }
   const summary = state.hpaPeak;
   if (!summary) {
-    panel.textContent = "尚未建立排程尖峰資料";
+    panel.textContent = "尚未載入 web autoscaling 狀態";
     return;
   }
   const hpaStatuses = summary.statuses ?? {};
@@ -746,7 +754,7 @@ function renderHPAPeakSummary() {
       <span>HPA 目標 ${Number(autoscaling.desiredReplicas ?? 0).toLocaleString()} / ${Number(autoscaling.maxReplicas ?? 0).toLocaleString()}</span>
       <span>目前 replicas ${Number(autoscaling.currentReplicas ?? 0).toLocaleString()}</span>
       <span>Deployment ready ${Number(autoscaling.readyReplicas ?? 0).toLocaleString()} / ${Number(autoscaling.deploymentReplicas ?? 0).toLocaleString()}</span>
-      <span>Worker pods ready ${Number(autoscaling.readyPods ?? 0).toLocaleString()} / ${Number(autoscaling.workerPods ?? 0).toLocaleString()}</span>
+      <span>web pods ready ${Number(autoscaling.readyPods ?? 0).toLocaleString()} / ${Number(autoscaling.podCount ?? 0).toLocaleString()}</span>
     </div>
     ${autoscalingError}`
     : `
@@ -755,22 +763,20 @@ function renderHPAPeakSummary() {
     </div>`;
   panel.innerHTML = `
     <div class="hpa-metrics">
-      <span>產線 ${Number(summary.lineCount ?? 0).toLocaleString()}</span>
-      <span>訂單 ${Number(summary.orderCount ?? 0).toLocaleString()}</span>
-      <span>排程任務 ${Number(summary.jobCount ?? 0).toLocaleString()}</span>
+      <span>GKE LoadBalancer</span>
+      <span>多使用者 web traffic</span>
+      <span>KEDA Prometheus trigger</span>
     </div>
     ${autoscalingPanel}
-    <div class="hpa-status-grid">
-      ${Object.entries(hpaJobStatusLabels).map(([status, label]) => `<span>${label} ${Number(hpaStatuses[status] ?? 0).toLocaleString()}</span>`).join("")}
-    </div>
     <dl class="hpa-metadata">
-      <div><dt>Kafka 主題</dt><dd>${escapeHtml(summary.topic ?? "woms.schedule.jobs")}</dd></div>
-      <div><dt>消費者群組</dt><dd>${escapeHtml(summary.consumerGroup ?? "woms-scheduler-workers")}</dd></div>
-      <div><dt>HPA 名稱</dt><dd>${escapeHtml(summary.hpaName ?? "woms-woms-worker-hpa")}</dd></div>
-      <div><dt>部署名稱</dt><dd>${escapeHtml(summary.deploymentName ?? "woms-woms-worker")}</dd></div>
+      <div><dt>Grafana</dt><dd>${escapeHtml(summary.grafanaPath ?? "/grafana/")}</dd></div>
+      <div><dt>指標</dt><dd>${escapeHtml(summary.metricName ?? "woms_web_nginx_requests_per_second_per_pod")}</dd></div>
+      <div><dt>HPA 名稱</dt><dd>${escapeHtml(summary.hpaName ?? "woms-woms-web-hpa")}</dd></div>
+      <div><dt>部署名稱</dt><dd>${escapeHtml(summary.deploymentName ?? "woms-woms-web")}</dd></div>
+      <div><dt>壓測範例</dt><dd>${escapeHtml(summary.loadCommand ?? "hey -z 5m -c 80 http://<LOAD_BALANCER_IP>:8080/")}</dd></div>
       <div><dt>觀察指令</dt><dd>${escapeHtml(summary.watchCommand ?? "kubectl get hpa,deploy,pod -n woms -w")}</dd></div>
     </dl>
-    <p class="hpa-reason">${escapeHtml(summary.reason ?? "Kafka lag 上升時，KEDA 會擴充 scheduler-worker pods。")}</p>
+    <p class="hpa-reason">${escapeHtml(summary.reason ?? "NGINX per-pod req/s 上升時，KEDA 會擴充 web pods。")}</p>
     ${failedMessages}
   `;
 }
@@ -1231,6 +1237,7 @@ function renderPreviewSummary() {
 
 function openPreviewDialog(preview) {
   state.preview = preview;
+  state.previewCalendarMode = "pending";
   closeProductionReport();
   renderPreviewPage();
   renderPreviewSummary();
@@ -1255,6 +1262,7 @@ function closePreviewPage() {
     dialog?.removeAttribute("open");
   }
   state.preview = null;
+  state.previewCalendarMode = "pending";
   renderPreviewSummary();
   renderCalendar();
 }
@@ -1289,12 +1297,25 @@ function renderPreviewPage() {
 }
 
 function renderPreviewCalendar(allocations) {
-  const previewMonth = firstPreviewDate(allocations) ?? state.calendarDate;
+  const isSalesDraft = state.preview?.kind === "sales-draft";
+  const mode = isSalesDraft ? state.previewCalendarMode : "pending";
+  const toggle = document.getElementById("preview-calendar-mode");
+  toggle.hidden = !isSalesDraft;
+  toggle.querySelectorAll("button").forEach((button) => {
+    const active = button.dataset.previewCalendarMode === mode;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", active ? "true" : "false");
+  });
+  const visibleAllocations = isSalesDraft && mode === "scheduled"
+    ? state.calendarAllocations
+    : allocations;
+  const calendarAllocations = isSalesDraft
+    ? visibleAllocations.map((allocation) => ({ ...allocation, preview: mode !== "scheduled" }))
+    : mergePreviewCalendarAllocations(allocations, state.calendarAllocations, state.preview?.request?.resolutionOrderIds ?? []);
+  const previewMonth = firstPreviewDate(visibleAllocations) ?? firstPreviewDate(allocations) ?? state.calendarDate;
   const year = previewMonth.getUTCFullYear();
   const monthIndex = previewMonth.getUTCMonth();
-  const resolutionOrderIds = state.preview?.request?.resolutionOrderIds ?? [];
-  const mergedAllocations = mergePreviewCalendarAllocations(allocations, state.calendarAllocations, resolutionOrderIds);
-  const groups = groupAllocationsByDate(mergedAllocations);
+  const groups = groupAllocationsByDate(calendarAllocations);
   const grid = document.getElementById("preview-calendar-grid");
   grid.innerHTML = "";
   for (const day of monthGrid(year, monthIndex)) {
@@ -1514,7 +1535,7 @@ function renderOrderAction(order) {
         aria-expanded="${expanded ? "true" : "false"}"
         aria-label="${expanded ? "收合修改訂單" : "展開修改訂單"}"
         title="${expanded ? "收合修改訂單" : "展開修改訂單"}"
-      >${expanded ? "▴" : "▾"}</button>
+      >訂單修改</button>
     `;
   }
   if (state.user?.role !== "scheduler") {

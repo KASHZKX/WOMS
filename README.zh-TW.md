@@ -38,10 +38,10 @@ flowchart LR
   Kafka --> Worker[Go Scheduler Worker]
   Worker --> Redis
   Worker --> DB
-  Gthulhu[Gthulhu Monitor Optional] -. observes pod scheduling .-> Worker
-  Gthulhu -. pod metrics .-> Prometheus[(Prometheus Optional)]
-  Prometheus -. optional trigger .-> KEDA
-  KEDA[KEDA ScaledObject Kafka + CPU + optional Prometheus] --> Worker
+  LB[GKE LoadBalancer] --> Web
+  Web -. NGINX metrics .-> Prometheus[(Prometheus / Grafana)]
+  Prometheus -. per-pod NGINX req/s .-> KEDA
+  KEDA[KEDA ScaledObject Prometheus trigger] --> Web
 ```
 
 ### Request 與 Scaling Flow
@@ -49,16 +49,16 @@ flowchart LR
 1. 使用者透過 NGINX Ingress 或本機 forwarded port 存取 static web UI。
 2. Web UI 呼叫 Go API。API 會驗證 JWT/RBAC，讀寫 PostgreSQL，使用 Redis 做排程鎖，並把排程任務 publish 到 Kafka。
 3. Scheduler workers 以 `woms-scheduler-workers` consumer group 消費 `woms.schedule.jobs`，計算 deterministic allocations，更新 PostgreSQL，並寫入 audit records。
-4. KEDA 透過 WOMS 既有 `ScaledObject` 擴縮 worker deployment。Kafka lag 是主要 trigger，CPU utilization 是次要 trigger，Gthulhu 可選擇性新增一個 Prometheus trigger 來反映 pod scheduling pressure。
-5. WOMS chart 可選擇性部署 vendored `gthulhu` subchart 的 monitor-only 模式。Gthulhu 觀察 worker pods，內建或 Alan Prometheus scrape target 從 `woms-gthulhu-scheduler-sidecar:9090` 讀 `/metrics`，WOMS 再透過 KEDA 讀 Prometheus query。
+4. KEDA 透過 WOMS `ScaledObject` 擴縮 web deployment。active trigger 是 web pods 的 per-pod NGINX request rate Prometheus query。
+5. KEDA、Prometheus 與 Grafana 共用同一個 `woms_web_nginx_requests_per_second_per_pod` 指標，作為 GKE LoadBalancer traffic demo 的觀察與擴縮依據。
 
 ### 可部署單元
 
 - `web`：由 NGINX 提供的原生 HTML/CSS/JS 前端。
 - `api`：Go REST API，負責 JWT、RBAC、訂單、試排、排程任務、生產回報與稽核紀錄。
 - `scheduler-worker`：Go worker，作為 Kafka 排程任務 consumer 的部署單元。
-- `deploy/helm/woms`：部署 API、worker、web、Ingress、KEDA、Prometheus/Grafana 與 optional `gthulhu` subchart 的 Kubernetes Helm chart。
-- 可選 Gthulhu 整合：`gthulhu.enabled=false` 是預設值。使用 `deploy/helm/woms/values-gthulhu-monitor.yaml` 會啟用 monitor-only Gthulhu、worker `PodSchedulingMetrics` selector、Alan-compatible Prometheus/Grafana wiring，以及第三個 KEDA Prometheus trigger。
+- `deploy/helm/woms`：部署 API、worker、web、Ingress、KEDA、Prometheus/Grafana 與 web NGINX metrics exporter 的 Kubernetes Helm chart。
+- 歷史 Gthulhu 筆記保留在 `docs/` 供參考；active chart 已不再部署 Gthulhu subchart，也不再使用 worker Kafka/CPU/Gthulhu KEDA triggers。
 
 ## 前置需求
 
@@ -73,8 +73,8 @@ flowchart LR
 - Kubernetes 叢集，例如 Docker Desktop Kubernetes、kind、minikube 或雲端 K8s
 - NGINX Ingress Controller
 - KEDA
-- metrics-server，CPU autoscaling 驗證會用到
-- Gthulhu scheduling-pressure autoscaling 選配：由 `/home/ubuntu/Gthulhu` build 的 Gthulhu monitor image，以及此 chart 內建或 Alan/kube-prometheus-stack 提供的 Prometheus/Grafana
+- 可提供 LoadBalancer 的 GKE 或等價 Kubernetes 環境，用於 web traffic autoscaling demo
+- 本 chart 內建的 Prometheus/Grafana 與 KEDA，用於 web NGINX request-rate trigger
 
 檢查工具版本：
 
@@ -209,11 +209,11 @@ docker build -f Dockerfile.web -t woms-web:local .
 
 ## Kubernetes 部署
 
-請先確認叢集已安裝 KEDA 與 metrics-server。只有啟用 `ingress.enabled=true` 時才需要 NGINX Ingress。
+請先確認叢集已安裝 KEDA。只有啟用 `ingress.enabled=true` 時才需要 NGINX Ingress；web traffic demo 另需可提供 LoadBalancer 的 cluster。
 
 乾淨 VM 的使用者流程應該分成兩層：
 
-1. 平台準備：Kubernetes、metrics-server 與 KEDA。若要啟用 optional Gthulhu trigger，需先安裝 Gthulhu 與 Prometheus。
+1. 平台準備：Kubernetes、KEDA，以及 web traffic demo 所需的 LoadBalancer 支援。
 2. WOMS 部署：使用 Helm 部署 API、web、scheduler-worker、Service、可選的 Ingress、KEDA ScaledObject，以及 PostgreSQL、Redis、Kafka chart dependencies。
 
 使用者不應手動 patch web deployment、手動建立 Kafka topic，或手動調整 topic partitions。這些都必須由 image、Helm chart 或平台 bootstrap 自動處理。
@@ -225,7 +225,7 @@ sudo snap install microk8s --classic --channel=1.35/stable
 sudo usermod -aG microk8s "$USER"
 newgrp microk8s
 microk8s status --wait-ready
-microk8s enable dns hostpath-storage metrics-server
+microk8s enable dns hostpath-storage
 microk8s enable community
 microk8s enable keda
 microk8s kubectl get node
@@ -290,7 +290,7 @@ API 與 scheduler-worker container 會在啟動時對 PostgreSQL 與 Kafka readi
 
 Chart 會固定 dependency chart 版本使用的 Bitnami image tags。Docker Hub 已不再從 `bitnami/*` 提供這些保留 tags，因此預設 values 會把 PostgreSQL、Redis、Kafka 與 Kafka topic hook 覆寫到 `bitnamilegacy/*`。
 
-單節點 MicroK8s demo 中，chart 也會把 Kafka internal topic replication 設為 `1`，包含 `offsets.topic.replication.factor`。若未設定，`__consumer_offsets` 會沿用 replication factor `3`，scheduler worker 無法建立 `woms-scheduler-workers` consumer group，KEDA 也無法讀取 Kafka lag metric。
+單節點 MicroK8s demo 中，chart 也會把 Kafka internal topic replication 設為 `1`，包含 `offsets.topic.replication.factor`。若未設定，`__consumer_offsets` 會沿用 replication factor `3`，scheduler worker 可能無法穩定建立 `woms-scheduler-workers` consumer group。
 
 如果環境中已有舊 release，Bitnami dependencies 在 `helm upgrade` 時可能要求帶入既有自動產生的 passwords。乾淨 VM demo 應先明確刪除舊 release 與 PVC 後再重新安裝；真正升級時則依 Helm 錯誤訊息提示，把既有 secrets 帶入。
 
@@ -335,77 +335,38 @@ Helm 中的 Grafana anonymous access 已停用。當 `monitoring.grafana.admin.e
 ssh -L 8081:127.0.0.1:8081 ubuntu@192.168.56.101
 ```
 
-### Scheduler Worker HPA Demo
+### Web Traffic HPA Demo
 
-WOMS 的 HPA 情境是 scheduler-worker backlog。月底排程或急單復原時，API 會把大量排程任務送到 Kafka topic `woms.schedule.jobs`。scheduler workers 共用 consumer group `woms-scheduler-workers`；當 lag 超過 `keda.kafka.lagThreshold`，KEDA 會建立並驅動 deployment `woms-woms-worker` 的 HPA `woms-woms-worker-hpa`。CPU utilization 保留為第二 trigger，用來支援排程計算尖峰。
+WOMS 目前 active HPA 情境是 GKE LoadBalancer 導入 web pods 的流量。web NGINX container 在 `127.0.0.1` 暴露 `stub_status`，sidecar `nginx-prometheus-exporter` 提供 `/metrics`，Prometheus scrape web Service 的 `metrics` port，KEDA 再用同一條 Grafana 顯示的 per-pod NGINX request-rate query 擴縮 `Deployment/woms-woms-web`。
 
-用 admin 登入 web，開啟「多產線排程尖峰」面板並按「建立多產線排程尖峰」。API 會先清除 `L001-L200` 舊資料，再建立 200 條 demo 產線、1,000 張待排程訂單與 400 個排程任務，並 publish 到 Kafka topic `woms.schedule.jobs`。demo 會為每條產線建立多個 jobs，因此可以實際觸發 Redis line lock；worker 會用 consumer group `woms-scheduler-workers` 消化 backlog。chart 會自動建立 topic，partition 數預設不小於 `keda.maxReplicaCount`，讓 HPA 擴出的 worker pods 可以平行消費。
+預設 active target：
 
-觀察 KEDA 建立 HPA 並擴展 worker：
+- Deployment：`woms-woms-web`
+- HPA：`woms-woms-web-hpa`
+- KEDA trigger：Prometheus
+- Metric：`woms_web_nginx_requests_per_second_per_pod`
+- Query：per-pod `rate(nginx_http_requests_total{job="woms-web-nginx"}[1m])`
+
+觀察 web HPA：
 
 ```bash
-kubectl get scaledobject,hpa,deploy,pod -n woms
-kubectl get hpa,deploy,pod -n woms -w
-kubectl describe hpa woms-woms-worker-hpa -n woms
-kubectl logs deploy/woms-woms-worker -n woms -f
+kubectl get scaledobject,hpa,deploy,pod,svc -n woms
+kubectl get hpa,deploy,pod -n woms -l app.kubernetes.io/component=web -w
+kubectl describe hpa woms-woms-web-hpa -n woms
 NAMESPACE=woms ./scripts/verify-k8s.sh
+./scripts/verify-hpa-render.sh
 ```
 
-`verify-k8s.sh` 會對應預設不啟用 Ingress 的 chart render。若使用 Ingress 部署，請先用 `--set ingress.enabled=true` 安裝，再執行 `INGRESS_ENABLED=true NAMESPACE=woms ./scripts/verify-k8s.sh`。
-
-HPA 不會建立名為 `hpa-*` 的 pod。HPA 是 autoscaling resource，會調整 `Deployment/woms-woms-worker` 的 replicas；成功時會看到多個 `woms-woms-worker-*` pods。`kubectl describe hpa woms-woms-worker-hpa -n woms` 的 Events 會顯示 `SuccessfulRescale` 與 external metric above target。
-
-Chart 也提供可選的 Gthulhu monitor-only integration。`values.yaml` 維持 `gthulhu.enabled=false` 與 `keda.gthulhu.enabled=false`；`deploy/helm/woms/values-gthulhu-monitor.yaml` 會啟用 vendored `gthulhu` subchart、設定 `scheduler.config.mode=none`、在 `woms-gthulhu-scheduler-sidecar:9090` 暴露 `/metrics`、部署 worker `PodSchedulingMetrics` selector，並把一個 Prometheus trigger 加進既有 worker `ScaledObject`。PoC overlay 會設定 `scheduler.monitor.monitorAll=true`，並使用加 suffix 的 Gthulhu scheduler ConfigMap name，讓 config 變更能乾淨重新掛載。Kafka、CPU、Gthulhu triggers 分別由 `keda.kafka.enabled`、`keda.cpu.enabled`、`keda.gthulhu.enabled` 獨立控制。
-
-從 Gthulhu source repo build 驗證 image，安裝時再帶入 tag：
-
-如果是在已部署過舊版 Gthulhu integration 的 VM 上升級，先清掉舊的 immutable scheduler ConfigMap，再執行 Helm：
+Admin panel 現在說明 web traffic autoscaling demo，不再建立 scheduler backlog。請使用 GKE LoadBalancer 位址與 `hey` 之類工具送入流量：
 
 ```bash
-kubectl delete configmap woms-gthulhu-scheduler-config -n woms --ignore-not-found
+LB_IP="$(kubectl get svc woms-woms-web -n woms -o jsonpath='{.status.loadBalancer.ingress[0].ip}')"
+hey -z 5m -c 80 "http://${LB_IP}:8080/"
 ```
 
-```bash
-REGISTRY=docker.io/d11nn PUSH=true ./scripts/build-push-gthulhu-images.sh
-helm upgrade --install woms ./deploy/helm/woms \
-  --namespace woms --create-namespace \
-  -f ./deploy/helm/woms/values-gthulhu-monitor.yaml \
-  --set gthulhu.scheduler.image.tag=woms-integration-<gthulhu-short-sha> \
-  --set gthulhu.scheduler.sidecar.image.tag=woms-integration-<gthulhu-short-sha> \
-  --set gthulhu.manager.image.tag=woms-integration-<gthulhu-short-sha>
-```
+透過 `/grafana/` 開啟 Grafana，查看 `WOMS web autoscaling` dashboard。`Per-pod NGINX req/s` panel 與 KEDA 使用同一條 query；壓測時 per-pod request rate 應上升，HPA 應增加 web replicas，`NGINX req/s by web pod` panel 應顯示流量分散到新 pods。
 
-若 Docker Hub credentials 不可用，改用 MicroK8s local registry：
-
-```bash
-REGISTRY=localhost:32000 PUSH=true ./scripts/build-push-gthulhu-images.sh
-helm upgrade --install woms ./deploy/helm/woms \
-  --namespace woms --create-namespace \
-  -f ./deploy/helm/woms/values-gthulhu-monitor.yaml \
-  --set gthulhu.scheduler.image.repository=localhost:32000/gthulhu-scx \
-  --set gthulhu.scheduler.image.tag=woms-integration-<gthulhu-short-sha> \
-  --set gthulhu.scheduler.sidecar.image.repository=localhost:32000/gthulhu-api \
-  --set gthulhu.scheduler.sidecar.image.tag=woms-integration-<gthulhu-short-sha> \
-  --set gthulhu.manager.image.repository=localhost:32000/gthulhu-api \
-  --set gthulhu.manager.image.tag=woms-integration-<gthulhu-short-sha>
-```
-
-Alan integration contract：scrape path 是 `/metrics`，service 是 `woms-gthulhu-scheduler-sidecar`，port 是 `9090`。Dashboard 會包含 `Worker Involuntary Context Switch Rate`、`Worker Run Queue Wait Time Rate` 與 `Tracked Worker Process Count` panels。內建 Prometheus target 會加上自己的 `namespace` label，因此 Gthulhu 原始 pod namespace 需要用 `exported_namespace="woms"` 查詢。
-
-三種 scaler path 可分開驗證：
-
-```bash
-./scripts/verify-gthulhu-monitoring.sh
-HPA_SCENARIO=cpu ./scripts/verify-hpa-behavior.sh
-HPA_SCENARIO=kafka ./scripts/verify-hpa-behavior.sh
-HPA_SCENARIO=gthulhu ./scripts/verify-hpa-behavior.sh
-```
-
-`verify-hpa-behavior.sh` 預設 `GTHULHU_IMAGE_TAG` 為 `woms-integration-f71f78a`；若要驗證其他 image tag，請設定 `GTHULHU_IMAGE_TAG=woms-integration-<gthulhu-short-sha>`。
-
-搬到 GKE Standard 時，Gthulhu 應放在允許 eBPF、hostPID、privileged 與 hostPath 的 Linux node pool；除非明確核准 scheduler handoff，仍保持 monitor-only；正式版本請用 `vX.Y.Z` 這類 release image tag，不要沿用驗證 tag。
-
-變更 WOMS 搭配使用的 Gthulhu branch 或 image 前，請先依照 [Gthulhu 與 WOMS 部署對齊指南](docs/gthulhu-woms-deployment.zh-TW.md) 檢查。已驗證的 WOMS PoC 基準是 Gthulhu `d11nn/feat/woms-poc`；任何較新的 upstream image 都必須重新 build 並驗證後，才能視為等同環境。
+歷史 Gthulhu 文件保留在 `docs/` 僅供參考。active Helm chart 已不再 vendoring 或 render Gthulhu chart、`PodSchedulingMetrics`、worker Kafka lag KEDA trigger、worker CPU trigger 或 Gthulhu Prometheus trigger。
 
 ### API And Web High Availability Demo
 
@@ -437,7 +398,7 @@ GitHub Actions 會執行：
 - `gofmt` check
 - API、worker 與 web Docker builds
 - Helm rendering
-- 使用 `./scripts/verify-hpa-render.sh` 驗證 scheduler worker HPA/KEDA render
+- 使用 `./scripts/verify-hpa-render.sh` 驗證 web HPA/KEDA render
 - 在 `main`、`release/**` 或 manual dispatch 時推送 Docker Hub image 與 tag
 - 在 `main` 自動更新 Helm image tag
 - 每次 `main` publish 成功後自動建立 Git tag，預設格式為 `v0.1.<run-number>`
@@ -477,6 +438,6 @@ NAMESPACE=woms ./scripts/verify-k8s.sh
 - API 未帶 token 會回 `401`。
 - sales 呼叫 scheduler API 會回 `403`。
 - Scheduler A 不能讀取或修改 Scheduler B 產線資料。
-- `helm template` 預設可 render KEDA `ScaledObject` 與 PDB；設定 `ingress.enabled=true` 時才會 render Ingress。
-- Kafka lag 上升時 worker replicas 會 scale up，lag 消退後會 scale down。
+- `helm template` 預設可 render web KEDA `ScaledObject`、NGINX metrics exporter、LoadBalancer web Service 與 PDB；設定 `ingress.enabled=true` 時才會 render Ingress。
+- Per-pod NGINX req/s 上升時 web replicas 會 scale up，流量消退並等待 cooldown 後會 scale down。
 - 每個 feature 都必須完成 README、測試、commit 與 push。

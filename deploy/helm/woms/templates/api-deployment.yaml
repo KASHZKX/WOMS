@@ -46,7 +46,7 @@ spec:
             - name: KAFKA_SCHEDULE_TOPIC
               value: {{ .Values.api.env.scheduleTopic | quote }}
             - name: KAFKA_CONSUMER_GROUP
-              value: {{ .Values.keda.kafka.consumerGroup | quote }}
+              value: {{ .Values.scheduleQueue.consumerGroup | quote }}
             - name: KAFKA_PUBLISH_ENABLED
               value: {{ .Values.api.env.kafkaPublishEnabled | quote }}
             - name: POD_NAMESPACE
@@ -54,11 +54,11 @@ spec:
                 fieldRef:
                   fieldPath: metadata.namespace
             - name: HPA_DEMO_HPA_NAME
-              value: {{ printf "%s-worker-hpa" (include "woms.fullname" .) | quote }}
+              value: {{ printf "%s-web-hpa" (include "woms.fullname" .) | quote }}
             - name: HPA_DEMO_DEPLOYMENT_NAME
-              value: {{ printf "%s-worker" (include "woms.fullname" .) | quote }}
+              value: {{ printf "%s-web" (include "woms.fullname" .) | quote }}
             - name: HPA_DEMO_POD_LABEL_SELECTOR
-              value: {{ printf "app.kubernetes.io/instance=%s,app.kubernetes.io/component=scheduler-worker" .Release.Name | quote }}
+              value: {{ printf "app.kubernetes.io/instance=%s,app.kubernetes.io/component=web" .Release.Name | quote }}
             - name: CORS_ALLOWED_ORIGIN
               value: {{ .Values.api.env.corsAllowedOrigin | quote }}
             - name: AUTH_MODE

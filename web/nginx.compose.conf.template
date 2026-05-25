@@ -28,6 +28,13 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 
+    location = /nginx_status {
+        stub_status;
+        access_log off;
+        allow 127.0.0.1;
+        deny all;
+    }
+
     location = /grafana {
         return 301 /grafana/;
     }

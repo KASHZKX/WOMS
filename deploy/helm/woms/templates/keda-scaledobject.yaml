@@ -2,19 +2,19 @@
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:
-  name: {{ include "woms.fullname" . }}-worker
+  name: {{ include "woms.fullname" . }}-web
   labels:
     {{- include "woms.labels" . | nindent 4 }}
 spec:
   scaleTargetRef:
-    name: {{ include "woms.fullname" . }}-worker
+    name: {{ include "woms.fullname" . }}-web
   minReplicaCount: {{ .Values.keda.minReplicaCount }}
   maxReplicaCount: {{ .Values.keda.maxReplicaCount }}
   pollingInterval: {{ .Values.keda.pollingInterval }}
   cooldownPeriod: {{ .Values.keda.cooldownPeriod }}
   advanced:
     horizontalPodAutoscalerConfig:
-      name: {{ include "woms.fullname" . }}-worker-hpa
+      name: {{ include "woms.fullname" . }}-web-hpa
       behavior:
         scaleUp:
           stabilizationWindowSeconds: {{ .Values.keda.hpa.scaleUp.stabilizationWindowSeconds }}
@@ -29,27 +29,10 @@ spec:
               value: {{ .Values.keda.hpa.scaleDown.percent }}
               periodSeconds: {{ .Values.keda.hpa.scaleDown.periodSeconds }}
   triggers:
-    {{- if .Values.keda.kafka.enabled }}
-    - type: kafka
-      metadata:
-        bootstrapServers: {{ tpl .Values.keda.kafka.bootstrapServers . | quote }}
-        topic: {{ .Values.keda.kafka.topic | quote }}
-        consumerGroup: {{ .Values.keda.kafka.consumerGroup | quote }}
-        lagThreshold: {{ .Values.keda.kafka.lagThreshold | quote }}
-        offsetResetPolicy: {{ .Values.keda.kafka.offsetResetPolicy | quote }}
-    {{- end }}
-    {{- if .Values.keda.cpu.enabled }}
-    - type: cpu
-      metricType: Utilization
-      metadata:
-        value: {{ .Values.keda.cpu.targetUtilization | quote }}
-    {{- end }}
-    {{- if .Values.keda.gthulhu.enabled }}
     - type: prometheus
       metadata:
-        serverAddress: {{ tpl .Values.keda.gthulhu.prometheusServerAddress . | quote }}
-        metricName: {{ .Values.keda.gthulhu.metricName | quote }}
-        query: {{ tpl .Values.keda.gthulhu.query . | quote }}
-        threshold: {{ .Values.keda.gthulhu.threshold | quote }}
-    {{- end }}
+        serverAddress: {{ tpl .Values.keda.prometheus.serverAddress . | quote }}
+        metricName: {{ .Values.keda.prometheus.metricName | quote }}
+        query: {{ tpl .Values.keda.prometheus.query . | quote }}
+        threshold: {{ .Values.keda.prometheus.threshold | quote }}
 {{- end }}
