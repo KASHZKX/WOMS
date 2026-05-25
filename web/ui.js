@@ -32,16 +32,12 @@ export function customerFilterValues(orders, filters) {
 
 export function sortOrdersForWorkstation(orders) {
   return [...orders].sort((a, b) => {
-    const statusDelta = orderStatusRank(a.status) - orderStatusRank(b.status);
-    if (statusDelta !== 0) {
-      return statusDelta;
+    if (a.priority !== b.priority) {
+      return a.priority === "high" ? -1 : 1;
     }
     const dueDelta = dateValue(a.dueDate) - dateValue(b.dueDate);
     if (dueDelta !== 0) {
       return dueDelta;
-    }
-    if (a.priority !== b.priority) {
-      return a.priority === "high" ? -1 : 1;
     }
     return naturalOrderNumber(a.id) - naturalOrderNumber(b.id) || String(a.id).localeCompare(String(b.id));
   });
@@ -79,6 +75,9 @@ export function conflictExplanation(conflict) {
   }
   if (conflict.reason === "existing allocations require manual review or reschedule") {
     return "這次試排會碰到既有排程。若客戶或高優先級需求已核准，可以填寫原因後用人工強制介入重新試排。";
+  }
+  if (conflict.reason === "preview selection includes order") {
+    return "此訂單已包含在本次試排清單中，若不想排入可取消選取。";
   }
   return "這筆衝突需要排程工程師檢查產能、交期與受影響訂單後再處理。";
 }

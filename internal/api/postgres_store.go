@@ -403,9 +403,9 @@ func (s *PostgresStore) CreateDemoConflictOrders(req demoConflictRequest, claims
 	now := time.Now().UTC()
 	orders := make([]domain.Order, 0, req.Count)
 	for index := 1; index <= req.Count; index++ {
-		createdAt := now.Add(time.Duration(index) * time.Nanosecond)
+		createdAt := now.Add(time.Duration(index) * time.Microsecond)
 		order := domain.Order{
-			ID:        "ORD-" + strconv.FormatInt(createdAt.UnixNano(), 10),
+			ID:        orderIDFromTime(createdAt),
 			Customer:  "Conflict Demo " + strconv.Itoa(index),
 			LineID:    lineID,
 			Quantity:  2500,
