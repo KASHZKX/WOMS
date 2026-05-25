@@ -456,7 +456,7 @@ document.getElementById("preview-page-list").addEventListener("click", async (ev
       const orderIds = checkedValues("[data-conflict-solution-order]");
       const resolutionOrderIds = checkedValues("[data-conflict-resolution-order]");
       if (orderIds.length === 0) {
-        showMessage("請選取衝突訂單", "至少選取一張衝突訂單才能產生最早完成解法。", "warn");
+        showMessage("請選取訂單", "至少選取一張訂單才能產生最早完成解法。", "warn");
         return;
       }
       await retryPreview({
@@ -1289,11 +1289,13 @@ function renderPreviewPage() {
 }
 
 function renderPreviewCalendar(allocations) {
+  const conflicts = state.preview?.conflicts ?? [];
   const previewMonth = firstPreviewDate(allocations) ?? state.calendarDate;
   const year = previewMonth.getUTCFullYear();
   const monthIndex = previewMonth.getUTCMonth();
   const resolutionOrderIds = state.preview?.request?.resolutionOrderIds ?? [];
-  const mergedAllocations = mergePreviewCalendarAllocations(allocations, state.calendarAllocations, resolutionOrderIds);
+  const previewAllocations = conflicts.length > 0 ? [] : allocations;
+  const mergedAllocations = mergePreviewCalendarAllocations(previewAllocations, state.calendarAllocations, resolutionOrderIds);
   const groups = groupAllocationsByDate(mergedAllocations);
   const grid = document.getElementById("preview-calendar-grid");
   grid.innerHTML = "";
@@ -1357,7 +1359,7 @@ function renderConflictActions(conflicts, manualForce) {
     <div class="conflict-actions">
       <h3>衝突修改</h3>
       <p class="conflict-note">可以選取衝突訂單與可移動的既有排程，先預覽最早完成解法；確認接受後才會更新正式日曆。</p>
-      ${renderConflictSolutionPicker(conflicts)}
+      ${renderConflictSolutionPicker(conflicts, state.preview?.request?.orderIds ?? [])}
       <label>
         <span>調整開始日期</span>
         <input id="conflict-start-date" type="date" onclick="this.showPicker()" value="${escapeHtml(startDate)}">
@@ -1370,8 +1372,11 @@ function renderConflictActions(conflicts, manualForce) {
   `;
 }
 
-function renderConflictSolutionPicker(conflicts) {
-  const conflictOrderIds = Array.from(new Set(conflicts.map((conflict) => conflict.orderId))).sort();
+function renderConflictSolutionPicker(conflicts, selectedOrderIds) {
+  const conflictOrderIds = Array.from(new Set(conflicts.map((conflict) => conflict.orderId)));
+  const solutionOrderIds = Array.from(new Set([...(selectedOrderIds ?? []), ...conflictOrderIds])).sort();
+  const selectedSet = new Set(selectedOrderIds ?? []);
+  const hasSelection = selectedSet.size > 0;
   const affectedOrderIds = Array.from(new Set(conflicts.flatMap((conflict) => conflict.affectedOrderIds ?? []))).sort();
   const movableAffected = affectedOrderIds.filter(canMoveOrder);
   const blockedAffected = affectedOrderIds.filter((orderId) => !canMoveOrder(orderId));
@@ -1379,9 +1384,9 @@ function renderConflictSolutionPicker(conflicts) {
     <div class="solution-picker">
       <h4>最早完成解法</h4>
       <div class="solution-choice-list">
-        ${conflictOrderIds.map((orderId) => `
+        ${solutionOrderIds.map((orderId) => `
           <label class="check-option">
-            <input type="checkbox" data-conflict-solution-order value="${escapeHtml(orderId)}" checked>
+            <input type="checkbox" data-conflict-solution-order value="${escapeHtml(orderId)}" ${!hasSelection || selectedSet.has(orderId) ? "checked" : ""}>
             <span>排入 ${escapeHtml(orderId)}</span>
           </label>
         `).join("")}
