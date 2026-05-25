@@ -1,6 +1,6 @@
 # WOMS Verification Guide
 
-This workstation was used only for static, unit, Go, and Helm render checks. Local UI visual verification was not performed on this machine. Browser and GKE checks below must be run in an environment with a browser and a reachable Kubernetes LoadBalancer.
+This workstation was used only for static, unit, Go, and Helm render checks. Local UI visual verification was not performed on this machine. Browser and GKE checks below must be run in an environment with a browser and a reachable NGINX Ingress or LoadBalancer entry point.
 
 ## 1. Local Non-UI Verification
 
@@ -47,14 +47,24 @@ Run the app in a browser-capable environment, then verify:
    - Switch back to `待排程` and confirm the draft preview allocations return.
    - Confirm the final "放到待排程訂單" flow still creates a pending order.
 
-## 3. GKE LoadBalancer Web HPA Verification
+4. Sales main calendar switch:
+   - Log in as `sales` / `demo`.
+   - Click `待排程`: the main calendar shows pending backlog preview allocations only.
+   - Click `已排程`: the main calendar shows persisted schedule allocations only.
+   - Click `所有訂單`: the main calendar shows both sets, with pending backlog allocations using preview styling and pending status.
 
-Deploy to GKE or an equivalent LoadBalancer-capable cluster:
+## 3. GKE Ingress Or LoadBalancer Web HPA Verification
+
+Deploy to GKE or an equivalent Ingress/LoadBalancer-capable cluster:
 
 ```bash
 helm upgrade --install woms ./deploy/helm/woms \
-  --namespace woms --create-namespace
-kubectl get svc woms-woms-web -n woms -w
+  --namespace woms --create-namespace \
+  --set ingress.enabled=true \
+  --set ingress.host=woms.c1ydeh.net \
+  --set ingress.tls.enabled=true \
+  --set web.service.type=ClusterIP \
+  --set-json 'web.service.annotations={"cloud.google.com/neg":"{\"ingress\":true}"}'
 ```
 
 Confirm active resources:
@@ -67,7 +77,8 @@ kubectl get scaledobject woms-woms-web -n woms -o yaml
 
 Expected:
 
-- `woms-woms-web` Service is `LoadBalancer`.
+- `woms-woms-web` Service is `ClusterIP` when using NGINX Ingress, or explicitly configured as `LoadBalancer` in non-Ingress environments.
+- `woms-woms-public` Ingress routes the configured host to `woms-woms-web` when `ingress.enabled=true`.
 - `woms-woms-web` ScaledObject targets `Deployment/woms-woms-web`.
 - HPA name is `woms-woms-web-hpa`.
 - Trigger metric is `woms_web_nginx_requests_per_second_per_pod`.
@@ -75,8 +86,8 @@ Expected:
 Send multi-user traffic:
 
 ```bash
-LB_IP="$(kubectl get svc woms-woms-web -n woms -o jsonpath='{.status.loadBalancer.ingress[0].ip}')"
-hey -z 5m -c 80 "http://${LB_IP}:8080/"
+INGRESS_HOST="$(kubectl get ingress woms-woms-public -n woms -o jsonpath='{.spec.rules[0].host}')"
+hey -z 5m -c 80 "https://${INGRESS_HOST}/"
 ```
 
 Observe:
@@ -87,7 +98,7 @@ kubectl get hpa,deploy,pod -n woms -l app.kubernetes.io/component=web -w
 
 Grafana:
 
-- Open `http://<LOAD_BALANCER_IP>:8080/grafana/`.
+- Open `https://<INGRESS_HOST>/grafana/`, or the explicit `LOAD_URL` host used for non-Ingress verification.
 - Open dashboard `WOMS web autoscaling`.
 - Confirm `Per-pod NGINX req/s` rises during load.
 - Confirm `NGINX req/s by web pod` shows traffic distributed across pods after scale-out.

@@ -72,15 +72,17 @@ test("KEDA ScaledObject targets the web Deployment using Prometheus per-pod NGIN
   assert.doesNotMatch(scaledObject, /gthulhu/);
 });
 
-test("Web deployment exposes NGINX traffic metrics and LoadBalancer service", () => {
-  assert.match(values, /web:[\s\S]*service:[\s\S]*type:\s+LoadBalancer/);
+test("Web deployment exposes NGINX traffic metrics behind the ingress-backed ClusterIP service", () => {
+  assert.match(values, /web:[\s\S]*service:[\s\S]*type:\s+ClusterIP/);
   assert.match(values, /metrics:[\s\S]*repository:\s+nginx\/nginx-prometheus-exporter/);
-  assert.match(webDeployment, /if not \.Values\.keda\.enabled/);
+  assert.match(webDeployment, /replicas:\s+\{\{ ternary \.Values\.keda\.minReplicaCount \.Values\.web\.replicaCount \.Values\.keda\.enabled \}\}/);
   assert.match(webDeployment, /name:\s+nginx-exporter/);
   assert.match(webDeployment, /-nginx\.scrape-uri=\{\{ \.Values\.web\.metrics\.scrapeUri \}\}/);
   assert.match(webDeployment, /name:\s+metrics[\s\S]*containerPort:\s+\{\{ \.Values\.web\.metrics\.port \}\}/);
   assert.match(services, /type:\s+\{\{ \.Values\.web\.service\.type \}\}/);
   assert.match(services, /name:\s+metrics[\s\S]*targetPort:\s+metrics/);
+  assert.match(scaledObject, /if and \.Values\.keda\.enabled \.Values\.web\.metrics\.enabled/);
+  assert.match(values, /minReplicaCount:\s+2/);
 });
 
 test("Prometheus and Grafana use the same web NGINX traffic signal as KEDA", () => {
@@ -96,15 +98,19 @@ test("Prometheus and Grafana use the same web NGINX traffic signal as KEDA", () 
   assert.match(dashboard, /nginx_connections_active/);
 });
 
-test("Verification scripts cover the web HPA render and LoadBalancer behavior flow", () => {
+test("Verification scripts cover the web HPA render and ingress or LoadBalancer behavior flow", () => {
   assert.match(hpaRenderScript, /web-hpa/);
   assert.match(hpaRenderScript, /woms_web_nginx_requests_per_second_per_pod/);
   assert.match(hpaRenderScript, /type:\s+prometheus/);
+  assert.match(hpaRenderScript, /web\.metrics\.enabled=false/);
   assert.match(hpaRenderScript, /unexpected Kafka KEDA trigger/);
   assert.match(hpaRenderScript, /unexpected Gthulhu resources/);
   assert.match(hpaBehaviorScript, /WEB_DEPLOY="\$\{RELEASE\}-woms-web"/);
+  assert.match(hpaBehaviorScript, /PUBLIC_INGRESS="\$\{RELEASE\}-woms-public"/);
+  assert.match(hpaBehaviorScript, /LOAD_URL/);
   assert.match(hpaBehaviorScript, /LoadBalancer/);
   assert.match(hpaBehaviorScript, /nginx_http_requests_total/);
+  assert.match(hpaBehaviorScript, /duration_seconds/);
   assert.doesNotMatch(hpaBehaviorScript, /HPA_SCENARIO/);
   assert.doesNotMatch(hpaBehaviorScript, /WORKER_DEPLOY/);
 });

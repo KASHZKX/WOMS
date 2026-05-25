@@ -355,7 +355,7 @@ func TestHPAPeakDemoIsAdminOnlyAndReportsWebAutoscaling(t *testing.T) {
 	if payload.Summary.MetricName != "woms_web_nginx_requests_per_second_per_pod" {
 		t.Fatalf("expected web nginx metric, got %+v", payload.Summary)
 	}
-	if !strings.Contains(payload.Summary.Reason, "GKE LoadBalancer") || !strings.Contains(payload.Summary.Reason, "per-pod req/s") {
+	if !strings.Contains(payload.Summary.Reason, "NGINX Ingress") || !strings.Contains(payload.Summary.Reason, "per-pod req/s") {
 		t.Fatalf("expected web traffic reason, got %q", payload.Summary.Reason)
 	}
 	if payload.Summary.LineCount != 0 || payload.Summary.OrderCount != 0 || payload.Summary.JobCount != 0 {
@@ -1263,10 +1263,10 @@ func TestSchedulerPreviewKeepsUnselectedPendingOrdersOutOfCapacity(t *testing.T)
 	}
 }
 
-func TestScheduleCalendarDoesNotIncludePendingPreviewAllocations(t *testing.T) {
+func TestScheduleCalendarSeparatesPersistedAndPendingPreviewAllocations(t *testing.T) {
 	server := NewServer("secret", NewMemoryStore())
 	salesToken := login(t, server, "sales", "demo")
-	createOrderWithPriorityAndDue(t, server, salesToken, "A", "low", "2026-05-03")
+	pendingOrderID := createOrderWithPriorityAndDue(t, server, salesToken, "A", "low", "2026-06-03")
 
 	req := httptest.NewRequest(http.MethodGet, "/api/schedules/calendar?lineId=A&month=2026-05", nil)
 	req.Header.Set("Authorization", "Bearer "+salesToken)
@@ -1276,13 +1276,17 @@ func TestScheduleCalendarDoesNotIncludePendingPreviewAllocations(t *testing.T) {
 		t.Fatalf("calendar failed: %d %s", res.Code, res.Body.String())
 	}
 	var payload struct {
-		Allocations []calendarAllocation `json:"allocations"`
+		Allocations        []calendarAllocation `json:"allocations"`
+		PendingAllocations []calendarAllocation `json:"pendingAllocations"`
 	}
 	if err := json.Unmarshal(res.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("decode calendar response: %v", err)
 	}
 	if len(payload.Allocations) != 0 {
 		t.Fatalf("pending preview allocations should not affect monthly calendar, got %+v", payload.Allocations)
+	}
+	if len(payload.PendingAllocations) == 0 || payload.PendingAllocations[0].OrderID != pendingOrderID || payload.PendingAllocations[0].Status != domain.StatusPending {
+		t.Fatalf("expected pending backlog preview allocation to be separate, got %+v", payload.PendingAllocations)
 	}
 }
 

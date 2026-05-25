@@ -45,9 +45,12 @@ const state = {
   users: [],
   orders: [],
   calendarAllocations: [],
+  pendingCalendarAllocations: [],
+  calendarMode: "scheduled",
   preview: null,
   previewCalendarMode: "pending",
   hpaPeak: null,
+  hpaPeakPollingEnabled: false,
   productionOrderId: "",
   scheduleHistory: [],
   rejectOrderIds: [],
@@ -194,9 +197,10 @@ document.getElementById("create-hpa-peak").addEventListener("click", async () =>
     renderHPAPeakLoading("正在讀取 web Deployment、HPA 與 pod 狀態...");
     const payload = await request("/api/demo/hpa-peak", { method: "POST" });
     state.hpaPeak = payload.summary;
+    state.hpaPeakPollingEnabled = true;
     renderHPAPeakSummary();
     syncHPAPeakPolling();
-    showMessage("web autoscaling demo 已載入", "請由 GKE LoadBalancer 送入多使用者流量，觀察 Grafana per-pod NGINX req/s 與 web HPA。");
+    showMessage("web autoscaling demo 已載入", "請由 NGINX Ingress 或 LoadBalancer 送入多使用者流量，觀察 Grafana per-pod NGINX req/s 與 web HPA。");
   } catch (error) {
     showMessage("autoscaling 狀態讀取失敗", error.message, "warn");
     await loadHPAPeakSummary();
@@ -216,14 +220,24 @@ document.getElementById("clear-hpa-peak").addEventListener("click", async () => 
     renderHPAPeakLoading("正在清除舊版 L001-L200 的訂單、排程與紀錄...");
     const payload = await request("/api/demo/hpa-peak", { method: "DELETE" });
     state.hpaPeak = payload.summary;
+    state.hpaPeakPollingEnabled = false;
     renderHPAPeakSummary();
     syncHPAPeakPolling();
-    showMessage("舊版資料已清除", "web autoscaling demo 請改用 LoadBalancer 壓測與 Grafana 指標觀察。");
+    showMessage("舊版資料已清除", "web autoscaling demo 請改用 Ingress/LoadBalancer 壓測與 Grafana 指標觀察。");
     await refreshWorkspace();
   } catch (error) {
     showMessage("清除失敗", error.message, "warn");
     await loadHPAPeakSummary();
   }
+});
+
+document.getElementById("main-calendar-mode").addEventListener("click", (event) => {
+  const mode = event.target.dataset.calendarMode;
+  if (!mode) {
+    return;
+  }
+  state.calendarMode = mode;
+  renderCalendar();
 });
 
 document.getElementById("preview-calendar-mode").addEventListener("click", (event) => {
@@ -574,6 +588,7 @@ async function loadUsers() {
 async function loadHPAPeakSummary() {
   if (!state.token || state.user?.role !== "admin") {
     state.hpaPeak = null;
+    state.hpaPeakPollingEnabled = false;
     renderHPAPeakSummary();
     return;
   }
@@ -584,7 +599,10 @@ async function loadHPAPeakSummary() {
 }
 
 function syncHPAPeakPolling() {
-  const active = state.token && state.user?.role === "admin" && isHPAPeakActive(state.hpaPeak);
+  const active = state.hpaPeakPollingEnabled
+    && state.token
+    && state.user?.role === "admin"
+    && isHPAPeakActive(state.hpaPeak);
   if (!active) {
     if (hpaPeakPoller) {
       window.clearInterval(hpaPeakPoller);
@@ -614,7 +632,7 @@ function isHPAPeakActive(summary) {
   if (!summary) {
     return false;
   }
-  return Boolean(summary.hpaName || summary.deploymentName || summary.metricName)
+  return Boolean(summary.autoscaling)
     || Number(summary.lineCount ?? 0) > 0
     || Number(summary.orderCount ?? 0) > 0
     || Number(summary.jobCount ?? 0) > 0;
@@ -636,6 +654,7 @@ async function loadLines() {
 async function loadCalendar() {
   if (!state.token) {
     state.calendarAllocations = [];
+    state.pendingCalendarAllocations = [];
     renderCalendar();
     return;
   }
@@ -643,6 +662,7 @@ async function loadCalendar() {
   const month = monthKey(state.calendarDate);
   const payload = await request(`/api/schedules/calendar?lineId=${encodeURIComponent(lineId)}&month=${encodeURIComponent(month)}`);
   state.calendarAllocations = payload.allocations ?? [];
+  state.pendingCalendarAllocations = (payload.pendingAllocations ?? []).map((allocation) => ({ ...allocation, preview: true }));
   renderCalendar();
 }
 
@@ -763,7 +783,7 @@ function renderHPAPeakSummary() {
     </div>`;
   panel.innerHTML = `
     <div class="hpa-metrics">
-      <span>GKE LoadBalancer</span>
+      <span>NGINX Ingress / LoadBalancer</span>
       <span>多使用者 web traffic</span>
       <span>KEDA Prometheus trigger</span>
     </div>
@@ -773,7 +793,7 @@ function renderHPAPeakSummary() {
       <div><dt>指標</dt><dd>${escapeHtml(summary.metricName ?? "woms_web_nginx_requests_per_second_per_pod")}</dd></div>
       <div><dt>HPA 名稱</dt><dd>${escapeHtml(summary.hpaName ?? "woms-woms-web-hpa")}</dd></div>
       <div><dt>部署名稱</dt><dd>${escapeHtml(summary.deploymentName ?? "woms-woms-web")}</dd></div>
-      <div><dt>壓測範例</dt><dd>${escapeHtml(summary.loadCommand ?? "hey -z 5m -c 80 http://<LOAD_BALANCER_IP>:8080/")}</dd></div>
+      <div><dt>壓測範例</dt><dd>${escapeHtml(summary.loadCommand ?? "hey -z 5m -c 80 https://<INGRESS_HOST>/")}</dd></div>
       <div><dt>觀察指令</dt><dd>${escapeHtml(summary.watchCommand ?? "kubectl get hpa,deploy,pod -n woms -w")}</dd></div>
     </dl>
     <p class="hpa-reason">${escapeHtml(summary.reason ?? "NGINX per-pod req/s 上升時，KEDA 會擴充 web pods。")}</p>
@@ -1146,7 +1166,8 @@ function renderCalendar() {
   const monthIndex = state.calendarDate.getUTCMonth();
   document.getElementById("calendar-title").textContent = `${year}-${String(monthIndex + 1).padStart(2, "0")}`;
 
-  const groups = groupAllocationsByDate(state.calendarAllocations);
+  renderCalendarModeControl();
+  const groups = groupAllocationsByDate(mainCalendarAllocations());
   const grid = document.getElementById("calendar-grid");
   grid.innerHTML = "";
   for (const day of monthGrid(year, monthIndex)) {
@@ -1198,6 +1219,33 @@ function renderCalendar() {
       handleCalendarOrderClick(button.dataset.calendarOrderId, button.dataset.calendarDate);
     });
   });
+}
+
+function renderCalendarModeControl() {
+  const control = document.getElementById("main-calendar-mode");
+  const visible = state.user?.role === "sales";
+  control.hidden = !visible;
+  if (!visible) {
+    return;
+  }
+  control.querySelectorAll("button").forEach((button) => {
+    const active = button.dataset.calendarMode === state.calendarMode;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", active ? "true" : "false");
+  });
+}
+
+function mainCalendarAllocations() {
+  if (state.user?.role !== "sales") {
+    return state.calendarAllocations;
+  }
+  if (state.calendarMode === "pending") {
+    return state.pendingCalendarAllocations;
+  }
+  if (state.calendarMode === "all") {
+    return [...state.calendarAllocations, ...state.pendingCalendarAllocations];
+  }
+  return state.calendarAllocations;
 }
 
 function droppedOrderIds(dataTransfer) {
@@ -1306,11 +1354,12 @@ function renderPreviewCalendar(allocations) {
     button.classList.toggle("active", active);
     button.setAttribute("aria-pressed", active ? "true" : "false");
   });
-  const visibleAllocations = isSalesDraft && mode === "scheduled"
-    ? state.calendarAllocations
+  const pendingAllocations = allocations.map((allocation) => ({ ...allocation, preview: true }));
+  const visibleAllocations = isSalesDraft
+    ? previewCalendarAllocationsForMode(mode, pendingAllocations)
     : allocations;
   const calendarAllocations = isSalesDraft
-    ? visibleAllocations.map((allocation) => ({ ...allocation, preview: mode !== "scheduled" }))
+    ? visibleAllocations
     : mergePreviewCalendarAllocations(allocations, state.calendarAllocations, state.preview?.request?.resolutionOrderIds ?? []);
   const previewMonth = firstPreviewDate(visibleAllocations) ?? firstPreviewDate(allocations) ?? state.calendarDate;
   const year = previewMonth.getUTCFullYear();
@@ -1332,6 +1381,16 @@ function renderPreviewCalendar(allocations) {
     `;
     grid.appendChild(cell);
   }
+}
+
+function previewCalendarAllocationsForMode(mode, pendingAllocations) {
+  if (mode === "scheduled") {
+    return state.calendarAllocations;
+  }
+  if (mode === "all") {
+    return [...state.calendarAllocations, ...pendingAllocations];
+  }
+  return pendingAllocations;
 }
 
 function renderConflictItem(conflict, index = 0, withAcknowledgement = false) {
@@ -2021,8 +2080,10 @@ function clearSession() {
   state.lines = fallbackLines;
   state.orders = [];
   state.calendarAllocations = [];
+  state.pendingCalendarAllocations = [];
   state.preview = null;
   state.hpaPeak = null;
+  state.hpaPeakPollingEnabled = false;
   state.productionOrderId = "";
   state.selectedOrderIds.clear();
   state.expandedSalesPendingOrderIds.clear();

@@ -38,7 +38,7 @@ flowchart LR
   Kafka --> Worker[Go Scheduler Worker]
   Worker --> Redis
   Worker --> DB
-  LB[GKE LoadBalancer] --> Web
+  IngressLB[Ingress NGINX LoadBalancer] --> Ingress
   Web -. NGINX metrics .-> Prometheus[(Prometheus / Grafana)]
   Prometheus -. per-pod NGINX req/s .-> KEDA
   KEDA[KEDA ScaledObject Prometheus trigger] --> Web
@@ -50,7 +50,7 @@ flowchart LR
 2. Web UI 呼叫 Go API。API 會驗證 JWT/RBAC，讀寫 PostgreSQL，使用 Redis 做排程鎖，並把排程任務 publish 到 Kafka。
 3. Scheduler workers 以 `woms-scheduler-workers` consumer group 消費 `woms.schedule.jobs`，計算 deterministic allocations，更新 PostgreSQL，並寫入 audit records。
 4. KEDA 透過 WOMS `ScaledObject` 擴縮 web deployment。active trigger 是 web pods 的 per-pod NGINX request rate Prometheus query。
-5. KEDA、Prometheus 與 Grafana 共用同一個 `woms_web_nginx_requests_per_second_per_pod` 指標，作為 GKE LoadBalancer traffic demo 的觀察與擴縮依據。
+5. KEDA、Prometheus 與 Grafana 共用同一個 `woms_web_nginx_requests_per_second_per_pod` 指標，作為 NGINX Ingress 或 LoadBalancer traffic demo 的觀察與擴縮依據。
 
 ### 可部署單元
 
@@ -209,11 +209,11 @@ docker build -f Dockerfile.web -t woms-web:local .
 
 ## Kubernetes 部署
 
-請先確認叢集已安裝 KEDA。只有啟用 `ingress.enabled=true` 時才需要 NGINX Ingress；web traffic demo 另需可提供 LoadBalancer 的 cluster。
+請先確認叢集已安裝 KEDA。web traffic demo 需要 NGINX Ingress 或可提供 LoadBalancer 的 cluster。
 
 乾淨 VM 的使用者流程應該分成兩層：
 
-1. 平台準備：Kubernetes、KEDA，以及 web traffic demo 所需的 LoadBalancer 支援。
+1. 平台準備：Kubernetes、KEDA，以及 web traffic demo 所需的 NGINX Ingress 或 LoadBalancer 支援。
 2. WOMS 部署：使用 Helm 部署 API、web、scheduler-worker、Service、可選的 Ingress、KEDA ScaledObject，以及 PostgreSQL、Redis、Kafka chart dependencies。
 
 使用者不應手動 patch web deployment、手動建立 Kafka topic，或手動調整 topic partitions。這些都必須由 image、Helm chart 或平台 bootstrap 自動處理。
@@ -337,7 +337,7 @@ ssh -L 8081:127.0.0.1:8081 ubuntu@192.168.56.101
 
 ### Web Traffic HPA Demo
 
-WOMS 目前 active HPA 情境是 GKE LoadBalancer 導入 web pods 的流量。web NGINX container 在 `127.0.0.1` 暴露 `stub_status`，sidecar `nginx-prometheus-exporter` 提供 `/metrics`，Prometheus scrape web Service 的 `metrics` port，KEDA 再用同一條 Grafana 顯示的 per-pod NGINX request-rate query 擴縮 `Deployment/woms-woms-web`。
+WOMS 目前 active HPA 情境是 NGINX Ingress 或 LoadBalancer 導入 web pods 的流量。web NGINX container 在 `127.0.0.1` 暴露 `stub_status`，sidecar `nginx-prometheus-exporter` 提供 `/metrics`，Prometheus scrape web Service 的 `metrics` port，KEDA 再用同一條 Grafana 顯示的 per-pod NGINX request-rate query 擴縮 `Deployment/woms-woms-web`。
 
 預設 active target：
 
@@ -357,12 +357,14 @@ NAMESPACE=woms ./scripts/verify-k8s.sh
 ./scripts/verify-hpa-render.sh
 ```
 
-Admin panel 現在說明 web traffic autoscaling demo，不再建立 scheduler backlog。請使用 GKE LoadBalancer 位址與 `hey` 之類工具送入流量：
+Admin panel 現在說明 web traffic autoscaling demo，不再建立 scheduler backlog。請使用 Ingress host 或明確的 LoadBalancer URL 與 `hey` 之類工具送入流量：
 
 ```bash
-LB_IP="$(kubectl get svc woms-woms-web -n woms -o jsonpath='{.status.loadBalancer.ingress[0].ip}')"
-hey -z 5m -c 80 "http://${LB_IP}:8080/"
+INGRESS_HOST="$(kubectl get ingress woms-woms-public -n woms -o jsonpath='{.spec.rules[0].host}')"
+hey -z 5m -c 80 "https://${INGRESS_HOST}/"
 ```
+
+若叢集刻意用 web Service LoadBalancer 而不是 Ingress，執行 `scripts/verify-hpa-behavior.sh` 時設定 `LOAD_URL`。
 
 透過 `/grafana/` 開啟 Grafana，查看 `WOMS web autoscaling` dashboard。`Per-pod NGINX req/s` panel 與 KEDA 使用同一條 query；壓測時 per-pod request rate 應上升，HPA 應增加 web replicas，`NGINX req/s by web pod` panel 應顯示流量分散到新 pods。
 
@@ -438,6 +440,6 @@ NAMESPACE=woms ./scripts/verify-k8s.sh
 - API 未帶 token 會回 `401`。
 - sales 呼叫 scheduler API 會回 `403`。
 - Scheduler A 不能讀取或修改 Scheduler B 產線資料。
-- `helm template` 預設可 render web KEDA `ScaledObject`、NGINX metrics exporter、LoadBalancer web Service 與 PDB；設定 `ingress.enabled=true` 時才會 render Ingress。
+- `helm template` 預設可 render web KEDA `ScaledObject`、NGINX metrics exporter、ClusterIP web Service 與 PDB；設定 `ingress.enabled=true` 時才會 render Ingress。
 - Per-pod NGINX req/s 上升時 web replicas 會 scale up，流量消退並等待 cooldown 後會 scale down。
 - 每個 feature 都必須完成 README、測試、commit 與 push。

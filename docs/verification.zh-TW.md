@@ -1,6 +1,6 @@
 # WOMS 驗證指南
 
-這台工作機只執行靜態、單元、Go 與 Helm render 驗證。未在本機做 UI 視覺驗證。以下瀏覽器與 GKE 驗證必須在可開瀏覽器、且能取得 Kubernetes LoadBalancer 的環境執行。
+這台工作機只執行靜態、單元、Go 與 Helm render 驗證。未在本機做 UI 視覺驗證。以下瀏覽器與 GKE 驗證必須在可開瀏覽器、且能取得 NGINX Ingress 或 LoadBalancer 入口的環境執行。
 
 ## 1. 本機非 UI 驗證
 
@@ -47,14 +47,24 @@ test -z "$(gofmt -l .)"
    - 再切回 `待排程`，確認 draft preview allocations 回來。
    - 確認最後「放到待排程訂單」流程仍可建立待排程訂單。
 
-## 3. GKE LoadBalancer Web HPA 驗證
+4. Sales 主日曆切換：
+   - 以 `sales` / `demo` 登入。
+   - 點 `待排程`：主日曆只顯示 pending backlog preview allocations。
+   - 點 `已排程`：主日曆只顯示正式 persisted schedule allocations。
+   - 點 `所有訂單`：主日曆同時顯示兩者，pending backlog allocations 保留 preview 樣式與待排程狀態。
 
-部署到 GKE 或等價 LoadBalancer-capable cluster：
+## 3. GKE Ingress 或 LoadBalancer Web HPA 驗證
+
+部署到 GKE 或等價 Ingress/LoadBalancer-capable cluster：
 
 ```bash
 helm upgrade --install woms ./deploy/helm/woms \
-  --namespace woms --create-namespace
-kubectl get svc woms-woms-web -n woms -w
+  --namespace woms --create-namespace \
+  --set ingress.enabled=true \
+  --set ingress.host=woms.c1ydeh.net \
+  --set ingress.tls.enabled=true \
+  --set web.service.type=ClusterIP \
+  --set-json 'web.service.annotations={"cloud.google.com/neg":"{\"ingress\":true}"}'
 ```
 
 確認 active resources：
@@ -67,7 +77,8 @@ kubectl get scaledobject woms-woms-web -n woms -o yaml
 
 期望：
 
-- `woms-woms-web` Service 是 `LoadBalancer`。
+- 使用 NGINX Ingress 時，`woms-woms-web` Service 是 `ClusterIP`；非 Ingress 環境才明確設為 `LoadBalancer`。
+- `ingress.enabled=true` 時，`woms-woms-public` Ingress 會把設定的 host route 到 `woms-woms-web`。
 - `woms-woms-web` ScaledObject 指向 `Deployment/woms-woms-web`。
 - HPA 名稱是 `woms-woms-web-hpa`。
 - Trigger metric 是 `woms_web_nginx_requests_per_second_per_pod`。
@@ -75,8 +86,8 @@ kubectl get scaledobject woms-woms-web -n woms -o yaml
 送入多使用者流量：
 
 ```bash
-LB_IP="$(kubectl get svc woms-woms-web -n woms -o jsonpath='{.status.loadBalancer.ingress[0].ip}')"
-hey -z 5m -c 80 "http://${LB_IP}:8080/"
+INGRESS_HOST="$(kubectl get ingress woms-woms-public -n woms -o jsonpath='{.spec.rules[0].host}')"
+hey -z 5m -c 80 "https://${INGRESS_HOST}/"
 ```
 
 觀察：
@@ -87,7 +98,7 @@ kubectl get hpa,deploy,pod -n woms -l app.kubernetes.io/component=web -w
 
 Grafana：
 
-- 開啟 `http://<LOAD_BALANCER_IP>:8080/grafana/`。
+- 開啟 `https://<INGRESS_HOST>/grafana/`；非 Ingress 驗證則開啟 `LOAD_URL` 對應 host 的 `/grafana/`。
 - 開啟 dashboard `WOMS web autoscaling`。
 - 確認 `Per-pod NGINX req/s` 在壓測期間上升。
 - 確認 `NGINX req/s by web pod` 在 scale-out 後顯示流量分散到多個 pods。

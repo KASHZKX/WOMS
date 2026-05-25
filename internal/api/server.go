@@ -1585,10 +1585,11 @@ type calendarAllocation struct {
 }
 
 type calendarResponse struct {
-	LineID      string               `json:"lineId"`
-	Timezone    string               `json:"timezone"`
-	Month       string               `json:"month"`
-	Allocations []calendarAllocation `json:"allocations"`
+	LineID             string               `json:"lineId"`
+	Timezone           string               `json:"timezone"`
+	Month              string               `json:"month"`
+	Allocations        []calendarAllocation `json:"allocations"`
+	PendingAllocations []calendarAllocation `json:"pendingAllocations,omitempty"`
 }
 
 func (s *MemoryStore) ScheduleCalendar(lineID, month string, claims auth.Claims) (calendarResponse, error) {
@@ -1660,7 +1661,94 @@ func (s *MemoryStore) ScheduleCalendar(lineID, month string, claims auth.Claims)
 		return allocations[i].OrderID < allocations[j].OrderID
 	})
 
-	return calendarResponse{LineID: lineID, Timezone: line.Timezone, Month: month, Allocations: allocations}, nil
+	pendingAllocations := []calendarAllocation{}
+	if claims.Role == domain.RoleSales {
+		pendingInputs := []scheduler.OrderInput{}
+		for _, order := range s.orders {
+			if order.LineID != lineID || order.Status != domain.StatusPending {
+				continue
+			}
+			pendingInputs = append(pendingInputs, scheduler.OrderInput{
+				ID:       order.ID,
+				Customer: order.Customer,
+				LineID:   order.LineID,
+				Quantity: order.Quantity,
+				Priority: order.Priority,
+				Status:   order.Status,
+				DueDate:  order.DueDate,
+			})
+		}
+		existing := []scheduler.ExistingAllocation{}
+		for _, allocation := range s.allocations {
+			if allocation.LineID != lineID {
+				continue
+			}
+			existing = append(existing, scheduler.ExistingAllocation{
+				OrderID:  allocation.OrderID,
+				LineID:   allocation.LineID,
+				Date:     allocation.Date,
+				Quantity: allocation.Quantity,
+				Priority: allocation.Priority,
+				Locked:   allocation.Locked,
+			})
+		}
+		currentDate, err := currentDateInLineTimezone(line, nowUTC())
+		if err != nil {
+			return calendarResponse{}, err
+		}
+		pendingAllocations, err = pendingBacklogCalendarAllocations(line, pendingInputs, existing, currentDate, calendarStart, calendarEnd)
+		if err != nil {
+			return calendarResponse{}, err
+		}
+	}
+
+	return calendarResponse{LineID: lineID, Timezone: line.Timezone, Month: month, Allocations: allocations, PendingAllocations: pendingAllocations}, nil
+}
+
+func pendingBacklogCalendarAllocations(line domain.ProductionLine, pendingInputs []scheduler.OrderInput, existing []scheduler.ExistingAllocation, currentDate, calendarStart, calendarEnd time.Time) ([]calendarAllocation, error) {
+	if len(pendingInputs) == 0 {
+		return []calendarAllocation{}, nil
+	}
+	orderDueDates := map[string]time.Time{}
+	for _, input := range pendingInputs {
+		orderDueDates[input.ID] = input.DueDate
+	}
+	result, err := scheduler.Plan(scheduler.Request{
+		LineID:              line.ID,
+		CapacityPerDay:      line.CapacityPerDay,
+		StartDate:           truncateDate(currentDate).AddDate(0, 0, 1),
+		CurrentDate:         currentDate,
+		Orders:              pendingInputs,
+		ExistingAllocations: existing,
+	})
+	if err != nil {
+		return nil, err
+	}
+	allocations := []calendarAllocation{}
+	for _, allocation := range result.Allocations {
+		allocationDate := truncateDate(allocation.Date)
+		if allocationDate.Before(calendarStart) || !allocationDate.Before(calendarEnd) {
+			continue
+		}
+		allocations = append(allocations, calendarAllocation{
+			OrderID:  allocation.OrderID,
+			Customer: allocation.Customer,
+			LineID:   allocation.LineID,
+			Date:     allocationDate,
+			Quantity: allocation.Quantity,
+			Priority: allocation.Priority,
+			Status:   domain.StatusPending,
+			Locked:   allocation.Locked,
+			DueDate:  orderDueDates[allocation.OrderID],
+		})
+	}
+	sort.Slice(allocations, func(i, j int) bool {
+		if !allocations[i].Date.Equal(allocations[j].Date) {
+			return allocations[i].Date.Before(allocations[j].Date)
+		}
+		return allocations[i].OrderID < allocations[j].OrderID
+	})
+	return allocations, nil
 }
 
 func (s *MemoryStore) ScheduleHistory(lineID string, claims auth.Claims) ([]domain.AuditEntry, error) {
@@ -2418,8 +2506,8 @@ func hpaPeakSummaryDefaults() hpaPeakSummary {
 		DeploymentName: envDefault("HPA_DEMO_DEPLOYMENT_NAME", "woms-woms-web"),
 		MetricName:     envDefault("HPA_DEMO_METRIC_NAME", "woms_web_nginx_requests_per_second_per_pod"),
 		GrafanaPath:    envDefault("HPA_DEMO_GRAFANA_PATH", "/grafana/d/woms-monitoring/woms-monitoring"),
-		LoadCommand:    envDefault("HPA_DEMO_LOAD_COMMAND", `hey -z 5m -c 80 "http://<LOAD_BALANCER_IP>:8080/"`),
-		Reason:         "GKE LoadBalancer 導入多使用者 web 流量時，NGINX exporter 暴露 per-pod req/s；Prometheus、Grafana 與 KEDA 使用同一個指標擴充 web pods。",
+		LoadCommand:    envDefault("HPA_DEMO_LOAD_COMMAND", `hey -z 5m -c 80 "https://<INGRESS_HOST>/"`),
+		Reason:         "NGINX Ingress 或 LoadBalancer 導入多使用者 web 流量時，web pod 的 NGINX exporter 暴露 per-pod req/s；Prometheus、Grafana 與 KEDA 使用同一個指標擴充 web pods。",
 		WatchCommand:   fmt.Sprintf("kubectl get hpa,deploy,pod -n %s -l app.kubernetes.io/component=web -w", namespace),
 	}
 	summary.Autoscaling = loadHPAAutoscalingState(namespace, summary.HPAName, summary.DeploymentName)

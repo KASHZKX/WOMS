@@ -38,7 +38,7 @@ flowchart LR
   Kafka --> Worker[Go Scheduler Worker]
   Worker --> Redis
   Worker --> DB
-  LB[GKE LoadBalancer] --> Web
+  IngressLB[Ingress NGINX LoadBalancer] --> Ingress
   Web -. NGINX metrics .-> Prometheus[(Prometheus / Grafana)]
   Prometheus -. per-pod NGINX req/s .-> KEDA
   KEDA[KEDA ScaledObject Prometheus trigger] --> Web
@@ -50,7 +50,7 @@ flowchart LR
 2. The web UI calls the Go API. The API validates JWT/RBAC, reads and writes PostgreSQL, uses Redis for scheduling locks, and publishes schedule jobs to Kafka.
 3. Scheduler workers consume `woms.schedule.jobs` as the `woms-scheduler-workers` consumer group, compute deterministic allocations, update PostgreSQL, and write audit records.
 4. KEDA scales the web deployment from the WOMS `ScaledObject`. The active trigger is a Prometheus query for per-pod NGINX request rate from the web pods.
-5. The same `woms_web_nginx_requests_per_second_per_pod` signal is used by KEDA, Prometheus, and Grafana for the GKE LoadBalancer traffic demo.
+5. The same `woms_web_nginx_requests_per_second_per_pod` signal is used by KEDA, Prometheus, and Grafana for the NGINX Ingress or LoadBalancer traffic demo.
 
 ### Deployable Units
 
@@ -212,7 +212,7 @@ Make sure the cluster has KEDA installed first. NGINX Ingress is required only w
 
 A clean VM deployment should have two layers:
 
-1. Platform setup: Kubernetes, KEDA, and LoadBalancer support for the web traffic demo.
+1. Platform setup: Kubernetes, KEDA, and Ingress NGINX or LoadBalancer support for the web traffic demo.
 2. WOMS deployment: Helm installs the API, web, scheduler worker, Services, optional Ingress, KEDA ScaledObject, and the PostgreSQL, Redis, and Kafka chart dependencies.
 
 Users should not manually patch the web deployment, create Kafka topics, or tune topic partitions. Those operational details must be handled by the image, Helm chart, or platform bootstrap.
@@ -334,7 +334,7 @@ ssh -L 8081:127.0.0.1:8081 ubuntu@192.168.56.101
 
 ### Web Traffic HPA Demo
 
-The active HPA scenario for WOMS is GKE LoadBalancer traffic to the web pods. The web NGINX container exposes `stub_status` on `127.0.0.1`, a sidecar `nginx-prometheus-exporter` publishes `/metrics`, Prometheus scrapes the web Service `metrics` port, and KEDA scales `Deployment/woms-woms-web` with the same per-pod NGINX request-rate query shown in Grafana.
+The active HPA scenario for WOMS is NGINX Ingress or LoadBalancer traffic to the web pods. The web NGINX container exposes `stub_status` on `127.0.0.1`, a sidecar `nginx-prometheus-exporter` publishes `/metrics`, Prometheus scrapes the web Service `metrics` port, and KEDA scales `Deployment/woms-woms-web` with the same per-pod NGINX request-rate query shown in Grafana.
 
 Default active target:
 
@@ -354,12 +354,14 @@ NAMESPACE=woms ./scripts/verify-k8s.sh
 ./scripts/verify-hpa-render.sh
 ```
 
-The admin panel now describes the web traffic autoscaling demo. It does not create scheduler backlog. Use the GKE LoadBalancer address and a traffic tool such as `hey`:
+The admin panel now describes the web traffic autoscaling demo. It does not create scheduler backlog. Use the Ingress host or an explicit LoadBalancer URL and a traffic tool such as `hey`:
 
 ```bash
-LB_IP="$(kubectl get svc woms-woms-web -n woms -o jsonpath='{.status.loadBalancer.ingress[0].ip}')"
-hey -z 5m -c 80 "http://${LB_IP}:8080/"
+INGRESS_HOST="$(kubectl get ingress woms-woms-public -n woms -o jsonpath='{.spec.rules[0].host}')"
+hey -z 5m -c 80 "https://${INGRESS_HOST}/"
 ```
+
+For a cluster that intentionally exposes the web Service as a LoadBalancer instead of using Ingress, set `LOAD_URL` when running `scripts/verify-hpa-behavior.sh`.
 
 Open Grafana through `/grafana/` and inspect `WOMS web autoscaling`. The `Per-pod NGINX req/s` panel uses the same query as KEDA; during load, the per-pod request rate should rise, the HPA should increase web replicas, and the `NGINX req/s by web pod` panel should show traffic distributed across the new pods.
 
@@ -435,6 +437,6 @@ Minimum completion criteria:
 - API without token returns `401`.
 - Sales calling scheduler APIs returns `403`.
 - Scheduler A cannot read or mutate Scheduler B line data.
-- `helm template` renders the web KEDA `ScaledObject`, NGINX metrics exporter, LoadBalancer web Service, and PDBs by default; it renders Ingress when `ingress.enabled=true`.
+- `helm template` renders the web KEDA `ScaledObject`, NGINX metrics exporter, ClusterIP web Service, and PDBs by default; it renders Ingress when `ingress.enabled=true`.
 - Web replicas scale up when per-pod NGINX req/s rises and scale down after traffic drains and cooldown passes.
 - README, tests, commit, and push must be completed with every feature.

@@ -751,7 +751,8 @@ func (s *PostgresStore) ScheduleCalendar(lineID, month string, claims auth.Claim
 	if claims.Role == domain.RoleScheduler && claims.LineID != lineID {
 		return calendarResponse{}, errors.New("cannot access another production line")
 	}
-	if _, err := s.productionLine(lineID); err != nil {
+	line, err := s.productionLine(lineID)
+	if err != nil {
 		return calendarResponse{}, err
 	}
 	if month == "" {
@@ -782,7 +783,29 @@ func (s *PostgresStore) ScheduleCalendar(lineID, month string, claims auth.Claim
 		}
 		allocations = append(allocations, allocation)
 	}
-	return calendarResponse{LineID: lineID, Month: month, Allocations: allocations}, nil
+	if err := rows.Err(); err != nil {
+		return calendarResponse{}, err
+	}
+	pendingAllocations := []calendarAllocation{}
+	if claims.Role == domain.RoleSales {
+		pendingInputs, err := s.pendingOrderInputs(lineID, nil)
+		if err != nil {
+			return calendarResponse{}, err
+		}
+		existing, err := s.existingAllocations(lineID, nil)
+		if err != nil {
+			return calendarResponse{}, err
+		}
+		currentDate, err := currentDateInLineTimezone(line, time.Now().UTC())
+		if err != nil {
+			return calendarResponse{}, err
+		}
+		pendingAllocations, err = pendingBacklogCalendarAllocations(line, pendingInputs, existing, currentDate, calendarStart, calendarEnd)
+		if err != nil {
+			return calendarResponse{}, err
+		}
+	}
+	return calendarResponse{LineID: lineID, Timezone: line.Timezone, Month: month, Allocations: allocations, PendingAllocations: pendingAllocations}, nil
 }
 
 func (s *PostgresStore) ConfirmPreviewOrder(previewID string, claims auth.Claims) (domain.Order, error) {

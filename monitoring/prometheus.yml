@@ -12,6 +12,16 @@ scrape_configs:
         labels:
           service: woms-api
 
+  - job_name: woms-web-nginx
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - nginx-exporter:9113
+        labels:
+          namespace: woms
+          pod: compose-web-1
+          service: woms-web
+
   # ── Gthulhu infrastructure metrics (Postgres/Redis/Kafka) ──────
   # - job_name: gthulhu
   #   metrics_path: /metrics
