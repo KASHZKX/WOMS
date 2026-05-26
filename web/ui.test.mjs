@@ -78,10 +78,46 @@ test("sales pending order edits are isolated from scheduler pending cards", () =
   assert.match(app, /function canSalesEditPendingOrder\(order\) \{\n\s+return state\.user\?\.role === "sales" && order\?\.status === "待排程" && order\.createdBy === state\.user\.id;/);
   assert.match(orderAction, /data-order-action="toggle-sales-pending-edit"/);
   assert.match(orderAction, /aria-expanded="\$\{expanded \? "true" : "false"\}"/);
+  assert.match(orderAction, />訂單修改<\/button>/);
+  assert.doesNotMatch(orderAction, />\$\{expanded \? "▴" : "▾"\}<\/button>/);
   assert.match(orderAction, /修改：業務修改/);
   assert.match(orderAction, /deleteLabel: "刪除訂單"/);
   assert.match(orderAction, /if \(order\.status === "待排程"\) \{\n\s+return `<span class="row-hint">可拖曳到月曆<\/span>`;/);
   assert.match(styles, /\.sales-pending-toggle\s*\{/);
+});
+
+test("order status badges stay on one line in scheduler and sales cards", () => {
+  const styles = readFileSync(new URL("./styles.css", import.meta.url), "utf8");
+  assert.match(styles, /\.order-card-main div\s*\{[\s\S]*min-width:\s+0;/);
+  assert.match(styles, /\.tag\s*\{[\s\S]*flex:\s+0 0 auto;[\s\S]*white-space:\s+nowrap;/);
+});
+
+test("sales draft preview calendar can switch pending draft and scheduled allocations", () => {
+  const html = readFileSync(new URL("./index.html", import.meta.url), "utf8");
+  const app = readFileSync(new URL("./app.js", import.meta.url), "utf8");
+  assert.match(html, /id="preview-calendar-mode"[\s\S]*data-preview-calendar-mode="pending"[\s\S]*待排程/);
+  assert.match(html, /data-preview-calendar-mode="scheduled"[\s\S]*已排程/);
+  assert.match(html, /data-preview-calendar-mode="all"[\s\S]*所有訂單/);
+  assert.match(app, /previewCalendarMode:\s+"pending"/);
+  assert.match(app, /document\.getElementById\("preview-calendar-mode"\)\.addEventListener\("click"/);
+  assert.match(app, /const isSalesDraft = state\.preview\?\.kind === "sales-draft"/);
+  assert.match(app, /function previewCalendarAllocationsForMode\(mode, pendingAllocations\)/);
+  assert.match(app, /return \[\.\.\.state\.calendarAllocations, \.\.\.pendingAllocations\]/);
+  assert.match(app, /const previewAllocations = conflicts\.length > 0 \? \[\] : allocations;/);
+  assert.match(app, /const pendingAllocations = previewAllocations\.map\(\(allocation\) => \(\{ \.\.\.allocation, preview: true \}\)\)/);
+});
+
+test("sales main calendar can switch pending scheduled and all allocations", () => {
+  const html = readFileSync(new URL("./index.html", import.meta.url), "utf8");
+  const app = readFileSync(new URL("./app.js", import.meta.url), "utf8");
+  assert.match(html, /id="main-calendar-mode"[\s\S]*data-calendar-mode="pending"[\s\S]*待排程/);
+  assert.match(html, /data-calendar-mode="scheduled"[\s\S]*已排程/);
+  assert.match(html, /data-calendar-mode="all"[\s\S]*所有訂單/);
+  assert.match(app, /pendingCalendarAllocations:\s+\[\]/);
+  assert.match(app, /calendarMode:\s+"scheduled"/);
+  assert.match(app, /payload\.pendingAllocations/);
+  assert.match(app, /function mainCalendarAllocations\(\)/);
+  assert.match(app, /return \[\.\.\.state\.calendarAllocations, \.\.\.state\.pendingCalendarAllocations\]/);
 });
 
 test("web nginx proxy preserves API request paths", () => {
@@ -101,6 +137,18 @@ test("web nginx proxy preserves API request paths", () => {
   assert.match(compose, /nginx\.compose\.conf\.template:\/etc\/nginx\/templates\/default\.conf\.template:ro/);
 });
 
+test("compose NGINX status allows the separate exporter container", () => {
+  const composeNginx = readFileSync(new URL("./nginx.compose.conf.template", import.meta.url), "utf8");
+  const nginxStatus = composeNginx.match(/location = \/nginx_status \{[\s\S]*?\n    \}/)?.[0] ?? "";
+
+  assert.match(nginxStatus, /stub_status;/);
+  assert.match(nginxStatus, /allow 127\.0\.0\.1;/);
+  assert.match(nginxStatus, /allow 172\.16\.0\.0\/12;/);
+  assert.doesNotMatch(nginxStatus, /allow 10\.0\.0\.0\/8;/);
+  assert.doesNotMatch(nginxStatus, /allow 192\.168\.0\.0\/16;/);
+  assert.match(nginxStatus, /deny all;/);
+});
+
 test("web nginx proxies Grafana under the local 8081 web URL", () => {
   const nginx = readFileSync(new URL("./nginx.conf.template", import.meta.url), "utf8");
   const composeNginx = readFileSync(new URL("./nginx.compose.conf.template", import.meta.url), "utf8");
@@ -110,6 +158,7 @@ test("web nginx proxies Grafana under the local 8081 web URL", () => {
 
   assert.match(compose, /"8081:8080"/);
   assert.doesNotMatch(compose, /"80:8080"/);
+  assert.doesNotMatch(compose, /"9113:9113"/);
   assert.match(compose, /GRAFANA_UPSTREAM:\s+\$\{GRAFANA_UPSTREAM:-grafana:3000\}/);
   assert.match(compose, /GF_AUTH_ANONYMOUS_ENABLED:\s+"false"/);
   assert.doesNotMatch(compose, /GF_AUTH_ANONYMOUS_ENABLED:\s+"true"/);
@@ -149,12 +198,13 @@ test("schedule preview uses API currentDate as the confirmation payload source",
   assert.match(app, /currentDate:\s*result\.currentDate\s*\?\?\s*payloadData\.currentDate\s*\?\?\s*todayDateInputValue\(\)/);
 });
 
-test("main monthly calendar ignores preview allocations", () => {
+test("main monthly calendar uses only selected calendar data source", () => {
   const app = readFileSync(new URL("./app.js", import.meta.url), "utf8");
   const start = app.indexOf("function renderCalendar()");
   const end = app.indexOf("function renderPreviewSummary()", start);
   const body = app.slice(start, end);
-  assert.match(body, /groupAllocationsByDate\(state\.calendarAllocations\)/);
+  assert.match(body, /groupAllocationsByDate\(mainCalendarAllocations\(\)\)/);
+  assert.match(body, /if \(state\.user\?\.role !== "sales"\) \{\n\s+return state\.calendarAllocations;/);
   assert.doesNotMatch(body, /mergePreviewCalendarAllocations/);
   assert.doesNotMatch(body, /state\.preview\?\.allocations/);
 });

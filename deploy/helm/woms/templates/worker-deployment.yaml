@@ -6,9 +6,7 @@ metadata:
     {{- include "woms.labels" . | nindent 4 }}
     app.kubernetes.io/component: scheduler-worker
 spec:
-  {{- if not .Values.keda.enabled }}
   replicas: {{ .Values.worker.replicaCount }}
-  {{- end }}
   selector:
     matchLabels:
       app.kubernetes.io/instance: {{ .Release.Name }}
@@ -25,11 +23,11 @@ spec:
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
           env:
             - name: KAFKA_BROKERS
-              value: {{ tpl .Values.keda.kafka.bootstrapServers . | quote }}
+              value: {{ tpl .Values.scheduleQueue.bootstrapServers . | quote }}
             - name: KAFKA_SCHEDULE_TOPIC
-              value: {{ .Values.keda.kafka.topic | quote }}
+              value: {{ .Values.scheduleQueue.topic | quote }}
             - name: KAFKA_CONSUMER_GROUP
-              value: {{ .Values.keda.kafka.consumerGroup | quote }}
+              value: {{ .Values.scheduleQueue.consumerGroup | quote }}
             - name: DATABASE_URL
               value: {{ .Values.worker.env.databaseUrl | quote }}
             - name: REDIS_ADDR

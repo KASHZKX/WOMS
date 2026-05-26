@@ -32,10 +32,10 @@ data:
           - target_label: namespace
             replacement: {{ .Release.Namespace }}
 
-      {{- if and .Values.gthulhu.enabled .Values.gthulhu.scheduler.monitor.enabled .Values.monitoring.prometheus.scrape.gthulhu.enabled }}
-      - job_name: gthulhu-monitor
-        metrics_path: {{ .Values.monitoring.prometheus.scrape.gthulhu.path }}
-        scrape_interval: {{ .Values.monitoring.prometheus.scrape.gthulhu.interval }}
+      {{- if .Values.web.metrics.enabled }}
+      - job_name: woms-web-nginx
+        metrics_path: {{ .Values.monitoring.prometheus.scrape.web.path }}
+        scrape_interval: {{ .Values.monitoring.prometheus.scrape.web.interval }}
         kubernetes_sd_configs:
           - role: endpoints
             namespaces:
@@ -44,12 +44,14 @@ data:
         relabel_configs:
           - source_labels: [__meta_kubernetes_service_name]
             action: keep
-            regex: {{ tpl .Values.monitoring.prometheus.scrape.gthulhu.service . }}
+            regex: {{ include "woms.fullname" . }}-web
           - source_labels: [__meta_kubernetes_endpoint_port_name]
             action: keep
-            regex: monitor-metrics
+            regex: {{ .Values.monitoring.prometheus.scrape.web.port }}
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
           - target_label: service
-            replacement: gthulhu-monitor
+            replacement: woms-web
           - target_label: namespace
             replacement: {{ .Release.Namespace }}
       {{- end }}

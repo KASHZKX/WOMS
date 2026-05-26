@@ -162,13 +162,13 @@
           <div class="hpa-demo-panel">
             <div>
               <p class="eyebrow">Autoscaling</p>
-              <h3>多產線排程尖峰</h3>
+              <h3>web traffic autoscaling demo</h3>
             </div>
-            <div id="hpa-demo-summary" class="hpa-demo-summary">尚未建立排程尖峰資料</div>
+            <div id="hpa-demo-summary" class="hpa-demo-summary">尚未載入 web autoscaling 狀態</div>
             <div class="button-row">
-              <button id="create-hpa-peak" type="button">建立多產線排程尖峰</button>
+              <button id="create-hpa-peak" type="button">載入 demo 狀態</button>
               <button id="refresh-hpa-peak" class="secondary-button" type="button">重新整理狀態</button>
-              <button id="clear-hpa-peak" class="danger-button" type="button">清除排程尖峰資料</button>
+              <button id="clear-hpa-peak" class="danger-button" type="button">清除舊排程尖峰資料</button>
             </div>
           </div>
         </section>
@@ -228,6 +228,11 @@
             <h2>月排程</h2>
           </div>
           <div class="calendar-controls">
+            <div id="main-calendar-mode" class="segmented-control calendar-mode-control">
+              <button data-calendar-mode="pending" type="button">待排程</button>
+              <button data-calendar-mode="scheduled" type="button">已排程</button>
+              <button data-calendar-mode="all" type="button">所有訂單</button>
+            </div>
             <button id="prev-month" type="button">上個月</button>
             <strong id="calendar-title"></strong>
             <button id="today-month" type="button">今天</button>
@@ -278,7 +283,14 @@
       </div>
       <div class="preview-page-grid">
         <section>
-          <h3>日曆預覽</h3>
+          <div class="preview-calendar-heading">
+            <h3>日曆預覽</h3>
+            <div id="preview-calendar-mode" class="segmented-control" hidden>
+              <button data-preview-calendar-mode="pending" type="button">待排程</button>
+              <button data-preview-calendar-mode="scheduled" type="button">已排程</button>
+              <button data-preview-calendar-mode="all" type="button">所有訂單</button>
+            </div>
+          </div>
           <div id="preview-calendar-grid" class="calendar-grid"></div>
         </section>
         <aside>

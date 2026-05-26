@@ -5,56 +5,60 @@ RELEASE="${RELEASE:-woms}"
 NAMESPACE="${NAMESPACE:-woms}"
 CHART="${CHART:-./deploy/helm/woms}"
 RENDERED_MANIFEST="${RENDERED_MANIFEST:-}"
-GTHULHU_ENABLED="${GTHULHU_ENABLED:-false}"
 VALUES_FILE="${VALUES_FILE:-}"
+values_args=""
+if [ -n "$VALUES_FILE" ]; then
+  values_args="-f $VALUES_FILE"
+fi
+cleanup_files=""
+trap '[ -z "$cleanup_files" ] || rm -f $cleanup_files' EXIT
+
+assert_manifest_contains() {
+  kind="$1"
+  name="$2"
+  pattern="$3"
+  file="$4"
+
+  if ! awk -v kind="$kind" -v name="$name" -v pattern="$pattern" '
+    BEGIN { RS = "\n---\n"; found = 0 }
+    $0 ~ "(^|\n)kind: " kind "(\n|$)" &&
+      $0 ~ "(^|\n)  name: " name "(\n|$)" &&
+      $0 ~ "(^|\n)" pattern "(\n|$)" { found = 1 }
+    END { exit found ? 0 : 1 }
+  ' "$file"; then
+    echo "expected ${kind}/${name} to contain: ${pattern}" >&2
+    exit 1
+  fi
+}
 
 if [ -n "$RENDERED_MANIFEST" ]; then
   rendered="$RENDERED_MANIFEST"
 else
   rendered="$(mktemp)"
-  trap 'rm -f "$rendered"' EXIT
+  cleanup_files="$rendered"
 
-  values_args=""
-  if [ -n "$VALUES_FILE" ]; then
-    values_args="-f $VALUES_FILE"
-  fi
-
-  if [ "$GTHULHU_ENABLED" = "true" ]; then
-    # shellcheck disable=SC2086
-    helm template "$RELEASE" "$CHART" --dependency-update --namespace "$NAMESPACE" $values_args --set keda.gthulhu.enabled=true >"$rendered"
-  else
-    # shellcheck disable=SC2086
-    helm template "$RELEASE" "$CHART" --dependency-update --namespace "$NAMESPACE" $values_args >"$rendered"
-  fi
+  # shellcheck disable=SC2086
+  helm template "$RELEASE" "$CHART" --dependency-update --namespace "$NAMESPACE" $values_args >"$rendered"
 fi
 
 grep -q "kind: ScaledObject" "$rendered"
-grep -q "name: ${RELEASE}-woms-worker-hpa" "$rendered"
+grep -q "name: ${RELEASE}-woms-web-hpa" "$rendered"
 grep -q "horizontalPodAutoscalerConfig:" "$rendered"
 grep -q "scaleTargetRef:" "$rendered"
-grep -q "name: ${RELEASE}-woms-worker" "$rendered"
-grep -q "minReplicaCount: 1" "$rendered"
+grep -q "name: ${RELEASE}-woms-web" "$rendered"
+assert_manifest_contains "Deployment" "${RELEASE}-woms-web" "  replicas: 2" "$rendered"
+grep -q "minReplicaCount: 2" "$rendered"
 grep -q "maxReplicaCount: 10" "$rendered"
-grep -q "type: kafka" "$rendered"
-grep -q 'topic: "woms.schedule.jobs"' "$rendered"
-grep -q 'consumerGroup: "woms-scheduler-workers"' "$rendered"
-grep -q 'lagThreshold: "10"' "$rendered"
-grep -q "type: cpu" "$rendered"
-grep -q "metricType: Utilization" "$rendered"
-grep -q 'value: "70"' "$rendered"
-gthulhu_metrics="$(grep -c 'metricName: "woms_worker_gthulhu_involuntary_ctx_switches_rate"' "$rendered" || true)"
-prometheus_triggers="$gthulhu_metrics"
-if [ "$GTHULHU_ENABLED" = "true" ]; then
-  [ "$prometheus_triggers" -eq 1 ]
-  [ "$gthulhu_metrics" -eq 1 ]
-  grep -Eq "serverAddress: \"http://(monitoring-kube-prometheus-prometheus.monitoring|${RELEASE}-woms-prometheus.${NAMESPACE}):9090\"" "$rendered"
-  expected_query="query: \"avg(rate(gthulhu_pod_involuntary_ctx_switches_total{exported_namespace=\\\"${NAMESPACE}\\\",pod_name=~\\\"${RELEASE}-woms-worker-.*\\\"}[2m]))\""
-  grep -Fq "$expected_query" "$rendered"
-  grep -q 'threshold: "20"' "$rendered"
-else
-  [ "$prometheus_triggers" -eq 0 ]
-  [ "$gthulhu_metrics" -eq 0 ]
-fi
+grep -q "type: prometheus" "$rendered"
+grep -q 'metricName: "woms_web_nginx_requests_per_second_per_pod"' "$rendered"
+grep -q 'nginx_http_requests_total' "$rendered"
+grep -q 'woms-web-nginx' "$rendered"
+grep -q 'threshold: "20"' "$rendered"
+grep -q "kind: Service" "$rendered"
+grep -q "type: ClusterIP" "$rendered"
+grep -q "name: nginx-exporter" "$rendered"
+grep -q "job_name: woms-web-nginx" "$rendered"
+grep -q "target_label: pod" "$rendered"
 grep -q "scaleUp:" "$rendered"
 grep -q "stabilizationWindowSeconds: 0" "$rendered"
 grep -q "scaleDown:" "$rendered"
@@ -64,13 +68,27 @@ grep -q "name: ${RELEASE}-woms-api" "$rendered"
 grep -q "name: ${RELEASE}-woms-web" "$rendered"
 grep -q "minAvailable: 1" "$rendered"
 
-if [ -n "$VALUES_FILE" ]; then
-  grep -q "kind: DaemonSet" "$rendered"
-  grep -q "name: ${RELEASE}-gthulhu-scheduler" "$rendered"
-  grep -q "name: monitor-metrics" "$rendered"
-  grep -q "kind: PodSchedulingMetrics" "$rendered"
-  grep -q "name: ${RELEASE}-woms-prometheus" "$rendered"
-  grep -q "name: ${RELEASE}-woms-grafana" "$rendered"
+if grep -q "type: kafka" "$rendered"; then
+  echo "unexpected Kafka KEDA trigger in active chart" >&2
+  exit 1
+fi
+if grep -q "metricType: Utilization" "$rendered"; then
+  echo "unexpected CPU KEDA trigger in active chart" >&2
+  exit 1
+fi
+if grep -qi "gthulhu" "$rendered"; then
+  echo "unexpected Gthulhu resources in active chart render" >&2
+  exit 1
 fi
 
-echo "HPA/KEDA render verification passed"
+metrics_disabled="$(mktemp)"
+cleanup_files="$cleanup_files $metrics_disabled"
+# shellcheck disable=SC2086
+helm template "$RELEASE" "$CHART" --dependency-update --namespace "$NAMESPACE" $values_args --set web.metrics.enabled=false --set web.replicaCount=4 --set keda.minReplicaCount=2 >"$metrics_disabled"
+if grep -q "kind: ScaledObject" "$metrics_disabled"; then
+  echo "unexpected web ScaledObject when web.metrics.enabled=false" >&2
+  exit 1
+fi
+assert_manifest_contains "Deployment" "${RELEASE}-woms-web" "  replicas: 4" "$metrics_disabled"
+
+echo "web HPA/KEDA render verification passed"

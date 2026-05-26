@@ -15,64 +15,38 @@
       }
     ]
   },
-  "description": "WOMS \u2014 Wafer Order Management System \u00b7 Live API & Runtime Metrics",
+  "description": "WOMS web traffic autoscaling demo. Prometheus, Grafana, and KEDA use the same per-pod NGINX request-rate signal.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
-  "id": null,
   "links": [],
   "panels": [
     {
-      "id": 2,
-      "title": "HTTP Req/s \u2014 Total (1 m)",
-      "description": "Aggregate requests/second across all routes",
-      "type": "stat",
-      "gridPos": {
-        "h": 5,
-        "w": 6,
-        "x": 0,
-        "y": 0
-      },
       "datasource": {
         "type": "prometheus",
         "uid": "PBFA97CFB590B2093"
       },
-      "targets": [
-        {
-          "expr": "sum(rate(woms_http_requests_total[1m]))",
-          "legendFormat": "req/s",
-          "refId": "A"
-        }
-      ],
+      "description": "Same scalar query used by the KEDA Prometheus trigger.",
       "fieldConfig": {
         "defaults": {
-          "unit": "short",
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "#73BF69",
-                "value": null
-              },
-              {
-                "color": "#F2CC0C",
-                "value": 100
-              },
-              {
-                "color": "#FF5733",
-                "value": 500
-              }
-            ]
-          },
           "decimals": 2,
-          "min": 0
+          "min": 0,
+          "unit": "reqps"
         },
         "overrides": []
       },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
       "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
         "reduceOptions": {
           "calcs": [
             "lastNotNull"
@@ -80,348 +54,167 @@
           "fields": "",
           "values": false
         },
-        "orientation": "horizontal",
-        "textMode": "value_and_name",
-        "colorMode": "background",
-        "graphMode": "area",
-        "justifyMode": "center"
-      }
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(nginx_http_requests_total{job=\"woms-web-nginx\",namespace=\"woms\"}[1m])) / clamp_min(count(up{job=\"woms-web-nginx\",namespace=\"woms\"}), 1)",
+          "legendFormat": "per-pod req/s",
+          "refId": "A"
+        }
+      ],
+      "title": "Per-pod NGINX req/s",
+      "type": "stat"
     },
     {
-      "id": 8,
-      "title": "Error Rate",
-      "type": "stat",
       "datasource": {
         "type": "prometheus",
         "uid": "PBFA97CFB590B2093"
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "percentunit",
+          "decimals": 2,
           "min": 0,
-          "max": 1
-        }
-      },
-      "targets": [
-        {
-          "expr": "sum(rate(woms_http_requests_total{status=~\"[45].*\"}[5m])) / sum(rate(woms_http_requests_total[5m]))",
-          "legendFormat": "Error Rate",
-          "refId": "A"
-        }
-      ],
-      "gridPos": {
-        "h": 5,
-        "w": 6,
-        "x": 6,
-        "y": 0
-      }
-    },
-    {
-      "id": 11,
-      "title": "Request Latency (P50)",
-      "type": "gauge",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "PBFA97CFB590B2093"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s",
-          "min": 0
-        }
-      },
-      "targets": [
-        {
-          "expr": "histogram_quantile(0.50, sum(rate(woms_http_request_duration_seconds_bucket[5m])) by (le))",
-          "legendFormat": "P50",
-          "refId": "A"
-        }
-      ],
-      "gridPos": {
-        "h": 5,
-        "w": 6,
-        "x": 12,
-        "y": 0
-      },
-      "description": "50th percentile request latency over the last 5 minutes"
-    },
-    {
-      "id": 7,
-      "title": "Request Latency (P99)",
-      "type": "gauge",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "PBFA97CFB590B2093"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s",
-          "min": 0
-        }
-      },
-      "targets": [
-        {
-          "expr": "histogram_quantile(0.99, sum(rate(woms_http_request_duration_seconds_bucket[5m])) by (le))",
-          "legendFormat": "P99",
-          "refId": "A"
-        }
-      ],
-      "gridPos": {
-        "h": 5,
-        "w": 6,
-        "x": 18,
-        "y": 0
-      }
-    },
-    {
-      "id": 3,
-      "title": "HTTP Requests by Status (1 h)",
-      "description": "Breakdown of total HTTP requests grouped by status code",
-      "type": "piechart",
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 0,
-        "y": 5
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "PBFA97CFB590B2093"
-      },
-      "targets": [
-        {
-          "expr": "sum by (status) (increase(woms_http_requests_total[1h]))",
-          "legendFormat": "HTTP {{status}}",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "color": {
-            "mode": "palette-classic"
-          }
+          "unit": "reqps"
         },
         "overrides": []
       },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 8,
+        "y": 0
+      },
+      "id": 2,
       "options": {
-        "pieType": "donut",
-        "displayLabels": [
-          "name",
-          "percent"
-        ],
         "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
           "displayMode": "table",
-          "placement": "right",
-          "calcs": [
-            "sum"
-          ]
+          "placement": "bottom"
         },
         "tooltip": {
-          "mode": "single"
+          "mode": "multi",
+          "sort": "none"
         }
-      }
+      },
+      "targets": [
+        {
+          "expr": "sum by (pod) (rate(nginx_http_requests_total{job=\"woms-web-nginx\",namespace=\"woms\"}[1m]))",
+          "legendFormat": "{{pod}}",
+          "refId": "A"
+        }
+      ],
+      "title": "NGINX req/s by web pod",
+      "type": "timeseries"
     },
     {
-      "id": 10,
-      "title": "Request Latency (P95)",
-      "type": "gauge",
       "datasource": {
         "type": "prometheus",
         "uid": "PBFA97CFB590B2093"
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "s",
-          "min": 0
-        }
+          "decimals": 0,
+          "min": 0,
+          "unit": "short"
+        },
+        "overrides": []
       },
-      "targets": [
-        {
-          "expr": "histogram_quantile(0.95, sum(rate(woms_http_request_duration_seconds_bucket[5m])) by (le))",
-          "legendFormat": "P95",
-          "refId": "A"
-        }
-      ],
       "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 8,
-        "y": 5
-      },
-      "description": "95th percentile request latency over the last 5 minutes"
-    },
-    {
-      "id": 5,
-      "title": "Go Runtime \u2014 Goroutines",
-      "description": "Number of goroutines currently running in the WOMS API process",
-      "type": "timeseries",
-      "gridPos": {
-        "h": 7,
+        "h": 6,
         "w": 8,
         "x": 0,
-        "y": 13
+        "y": 6
       },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "PBFA97CFB590B2093"
+      "id": 3,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
       },
       "targets": [
         {
-          "expr": "sum(go_goroutines{job=\"woms-api\"})",
-          "legendFormat": "goroutines",
+          "expr": "count(up{job=\"woms-web-nginx\",namespace=\"woms\"} == 1)",
+          "legendFormat": "ready exporters",
           "refId": "A"
         }
       ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "color": {
-            "fixedColor": "#73BF69",
-            "mode": "fixed"
-          },
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 10,
-            "gradientMode": "opacity",
-            "showPoints": "never",
-            "spanNulls": true,
-            "drawStyle": "line"
-          },
-          "min": 0
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "calcs": [
-            "last"
-          ]
-        },
-        "tooltip": {
-          "mode": "single"
-        }
-      }
+      "title": "Ready web metric exporters",
+      "type": "stat"
     },
     {
-      "id": 6,
-      "title": "Go Runtime \u2014 Heap Alloc",
-      "description": "Bytes of allocated heap objects (live)",
-      "type": "timeseries",
-      "gridPos": {
-        "h": 7,
-        "w": 8,
-        "x": 8,
-        "y": 13
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "PBFA97CFB590B2093"
-      },
-      "targets": [
-        {
-          "expr": "sum(go_memstats_heap_alloc_bytes{job=\"woms-api\"})",
-          "legendFormat": "heap alloc",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "color": {
-            "fixedColor": "#F2CC0C",
-            "mode": "fixed"
-          },
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 10,
-            "gradientMode": "opacity",
-            "showPoints": "never",
-            "spanNulls": true,
-            "drawStyle": "line"
-          },
-          "min": 0
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "calcs": [
-            "last",
-            "max"
-          ]
-        },
-        "tooltip": {
-          "mode": "single"
-        }
-      }
-    },
-    {
-      "id": 9,
-      "title": "System Health (CPU)",
-      "type": "timeseries",
       "datasource": {
         "type": "prometheus",
         "uid": "PBFA97CFB590B2093"
       },
       "fieldConfig": {
         "defaults": {
+          "decimals": 0,
+          "min": 0,
           "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 8,
+        "y": 8
+      },
+      "id": 4,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
         }
       },
       "targets": [
         {
-          "expr": "sum(rate(process_cpu_seconds_total{job=\"woms-api\"}[5m]))",
-          "legendFormat": "CPU Usage",
+          "expr": "sum by (pod) (nginx_connections_active{job=\"woms-web-nginx\",namespace=\"woms\"})",
+          "legendFormat": "{{pod}} active",
           "refId": "A"
         }
       ],
-      "gridPos": {
-        "h": 7,
-        "w": 8,
-        "x": 16,
-        "y": 13
-      }
+      "title": "Active NGINX connections by web pod",
+      "type": "timeseries"
     }
   ],
+  "refresh": "10s",
   "schemaVersion": 39,
   "tags": [
     "woms",
-    "monitoring",
-    "api"
+    "web",
+    "keda"
   ],
   "templating": {
     "list": []
   },
   "time": {
-    "from": "now-1h",
+    "from": "now-15m",
     "to": "now"
   },
-  "timepicker": {
-    "refresh_intervals": [
-      "5s",
-      "10s",
-      "30s",
-      "1m",
-      "5m"
-    ],
-    "time_options": [
-      "5m",
-      "15m",
-      "1h",
-      "6h",
-      "12h",
-      "24h",
-      "2d",
-      "7d"
-    ]
-  },
-  "timezone": "browser",
-  "title": "WOMS Monitoring",
+  "timepicker": {},
+  "timezone": "",
+  "title": "WOMS web autoscaling",
   "uid": "woms-monitoring",
-  "version": 3
+  "version": 1,
+  "weekStart": ""
 }

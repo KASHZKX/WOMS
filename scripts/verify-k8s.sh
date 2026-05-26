@@ -81,14 +81,14 @@ require_kafka_consumer_group() {
 }
 
 require_scaledobject_ready() {
-  status="$("$KUBECTL" get scaledobject "$RELEASE-woms-worker" -n "$NAMESPACE" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}')"
+  status="$("$KUBECTL" get scaledobject "$RELEASE-woms-web" -n "$NAMESPACE" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}')"
   [ "$status" = "True" ]
 }
 
 require_keda_external_metric() {
-  metric_name="$("$KUBECTL" get scaledobject "$RELEASE-woms-worker" -n "$NAMESPACE" -o jsonpath='{.status.externalMetricNames[0]}')"
+  metric_name="$("$KUBECTL" get scaledobject "$RELEASE-woms-web" -n "$NAMESPACE" -o jsonpath='{.status.externalMetricNames[0]}')"
   [ -n "$metric_name" ]
-  "$KUBECTL" get --raw "/apis/external.metrics.k8s.io/v1beta1/namespaces/${NAMESPACE}/${metric_name}?labelSelector=scaledobject.keda.sh%2Fname%3D${RELEASE}-woms-worker" \
+  "$KUBECTL" get --raw "/apis/external.metrics.k8s.io/v1beta1/namespaces/${NAMESPACE}/${metric_name}?labelSelector=scaledobject.keda.sh%2Fname%3D${RELEASE}-woms-web" \
     >/tmp/woms-keda-external-metric.json
   grep -Eq '"items"[[:space:]]*:[[:space:]]*\[[[:space:]]*\{' /tmp/woms-keda-external-metric.json
   grep -Eq '"value"[[:space:]]*:[[:space:]]*"[^"]+"' /tmp/woms-keda-external-metric.json
@@ -99,8 +99,8 @@ grep -q "kind: ScaledObject" /tmp/woms-rendered.yaml
 if [ "$INGRESS_ENABLED" = "true" ]; then
   grep -q "kind: Ingress" /tmp/woms-rendered.yaml
 fi
-grep -q "name: ${RELEASE}-woms-worker" /tmp/woms-rendered.yaml
-grep -q "name: ${RELEASE}-woms-worker-hpa" /tmp/woms-rendered.yaml
+grep -q "name: ${RELEASE}-woms-web" /tmp/woms-rendered.yaml
+grep -q "name: ${RELEASE}-woms-web-hpa" /tmp/woms-rendered.yaml
 grep -q "bootstrapServers: \"${KAFKA_BOOTSTRAP}\"" /tmp/woms-rendered.yaml
 grep -q "value: \"${KAFKA_BOOTSTRAP}\"" /tmp/woms-rendered.yaml
 require_rendered_pdb "${RELEASE}-woms-api"
@@ -108,8 +108,8 @@ require_rendered_pdb "${RELEASE}-woms-web"
 
 "$HELM" status "$RELEASE" -n "$NAMESPACE" | grep -q "STATUS: deployed"
 "$KUBECTL" get namespace "$NAMESPACE" >/dev/null
-"$KUBECTL" get scaledobject "$RELEASE-woms-worker" -n "$NAMESPACE"
-"$KUBECTL" get hpa "$RELEASE-woms-worker-hpa" -n "$NAMESPACE"
+"$KUBECTL" get scaledobject "$RELEASE-woms-web" -n "$NAMESPACE"
+"$KUBECTL" get hpa "$RELEASE-woms-web-hpa" -n "$NAMESPACE"
 "$KUBECTL" get poddisruptionbudget "$RELEASE-woms-api" "$RELEASE-woms-web" -n "$NAMESPACE"
 require_service "$RELEASE-woms-api"
 require_service "$RELEASE-woms-web"

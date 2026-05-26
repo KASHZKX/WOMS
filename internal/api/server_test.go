@@ -323,7 +323,7 @@ func TestScheduleJobPublishFailureRollsBackQueuedJob(t *testing.T) {
 	}
 }
 
-func TestHPAPeakDemoIsAdminOnlyAndCreatesWorkload(t *testing.T) {
+func TestHPAPeakDemoIsAdminOnlyAndReportsWebAutoscaling(t *testing.T) {
 	server := NewServer("secret", NewMemoryStore())
 	schedulerA := login(t, server, "scheduler-a", "demo")
 	req := httptest.NewRequest(http.MethodPost, "/api/demo/hpa-peak", nil)
@@ -332,6 +332,9 @@ func TestHPAPeakDemoIsAdminOnlyAndCreatesWorkload(t *testing.T) {
 	server.ServeHTTP(res, req)
 	if res.Code != http.StatusForbidden {
 		t.Fatalf("expected scheduler forbidden, got %d %s", res.Code, res.Body.String())
+	}
+	if !strings.Contains(res.Body.String(), "只有管理員可以查看 web autoscaling demo") {
+		t.Fatalf("expected web autoscaling forbidden copy, got %s", res.Body.String())
 	}
 
 	admin := login(t, server, "admin", "demo")
@@ -346,11 +349,17 @@ func TestHPAPeakDemoIsAdminOnlyAndCreatesWorkload(t *testing.T) {
 	if err := json.Unmarshal(res.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("decode hpa demo response: %v", err)
 	}
-	if payload.Summary.LineCount != 200 || payload.Summary.OrderCount != 1000 || payload.Summary.JobCount != 400 {
-		t.Fatalf("unexpected hpa demo summary: %+v", payload.Summary)
+	if payload.Summary.HPAName != "woms-woms-web-hpa" || payload.Summary.DeploymentName != "woms-woms-web" {
+		t.Fatalf("expected web HPA target, got %+v", payload.Summary)
 	}
-	if payload.Summary.Statuses[string(domain.JobQueued)] != 400 {
-		t.Fatalf("expected queued jobs, got %+v", payload.Summary.Statuses)
+	if payload.Summary.MetricName != "woms_web_nginx_requests_per_second_per_pod" {
+		t.Fatalf("expected web nginx metric, got %+v", payload.Summary)
+	}
+	if !strings.Contains(payload.Summary.Reason, "NGINX Ingress") || !strings.Contains(payload.Summary.Reason, "per-pod req/s") {
+		t.Fatalf("expected web traffic reason, got %q", payload.Summary.Reason)
+	}
+	if payload.Summary.LineCount != 0 || payload.Summary.OrderCount != 0 || payload.Summary.JobCount != 0 {
+		t.Fatalf("web autoscaling status should not create scheduling workload, got %+v", payload.Summary)
 	}
 
 	req = httptest.NewRequest(http.MethodDelete, "/api/demo/hpa-peak", nil)
@@ -363,12 +372,12 @@ func TestHPAPeakDemoIsAdminOnlyAndCreatesWorkload(t *testing.T) {
 	if err := json.Unmarshal(res.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("decode clear response: %v", err)
 	}
-	if payload.Summary.LineCount != 0 || payload.Summary.OrderCount != 0 || payload.Summary.JobCount != 400 || payload.Summary.Statuses[string(domain.JobCancelled)] != 400 {
+	if payload.Summary.LineCount != 0 || payload.Summary.OrderCount != 0 {
 		t.Fatalf("expected cleared hpa demo summary, got %+v", payload.Summary)
 	}
 }
 
-func TestHPAPeakDemoPublishFailureCancelsWorkload(t *testing.T) {
+func TestHPAPeakDemoPostDoesNotPublishScheduleJobs(t *testing.T) {
 	store := NewMemoryStore()
 	server := NewServerWithPublisher("secret", store, failingPublisher{})
 	admin := login(t, server, "admin", "demo")
@@ -377,21 +386,15 @@ func TestHPAPeakDemoPublishFailureCancelsWorkload(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer "+admin)
 	res := httptest.NewRecorder()
 	server.ServeHTTP(res, req)
-	if res.Code != http.StatusBadGateway {
-		t.Fatalf("expected publish failure, got %d %s", res.Code, res.Body.String())
-	}
-	if !strings.Contains(res.Body.String(), "排程尖峰任務送出失敗") {
-		t.Fatalf("expected zh-TW publish error, got %s", res.Body.String())
+	if res.Code != http.StatusAccepted {
+		t.Fatalf("expected accepted web status, got %d %s", res.Code, res.Body.String())
 	}
 	summary := store.HPAPeakSummary()
 	if summary.Statuses[string(domain.JobQueued)] != 0 {
-		t.Fatalf("publish failure should not leave queued jobs, got %+v", summary.Statuses)
-	}
-	if summary.Statuses[string(domain.JobCancelled)] != 400 {
-		t.Fatalf("expected failed demo workload to be cancelled, got %+v", summary.Statuses)
+		t.Fatalf("web status endpoint should not create queued jobs, got %+v", summary.Statuses)
 	}
 	if summary.OrderCount != 0 || summary.LineCount != 0 {
-		t.Fatalf("expected failed demo workload orders and lines to be cleared, got %+v", summary)
+		t.Fatalf("expected no demo workload orders and lines, got %+v", summary)
 	}
 }
 
@@ -1260,10 +1263,10 @@ func TestSchedulerPreviewKeepsUnselectedPendingOrdersOutOfCapacity(t *testing.T)
 	}
 }
 
-func TestScheduleCalendarDoesNotIncludePendingPreviewAllocations(t *testing.T) {
+func TestScheduleCalendarSeparatesPersistedAndPendingPreviewAllocations(t *testing.T) {
 	server := NewServer("secret", NewMemoryStore())
 	salesToken := login(t, server, "sales", "demo")
-	createOrderWithPriorityAndDue(t, server, salesToken, "A", "low", "2026-05-03")
+	pendingOrderID := createOrderWithPriorityAndDue(t, server, salesToken, "A", "low", "2026-06-03")
 
 	req := httptest.NewRequest(http.MethodGet, "/api/schedules/calendar?lineId=A&month=2026-05", nil)
 	req.Header.Set("Authorization", "Bearer "+salesToken)
@@ -1273,13 +1276,17 @@ func TestScheduleCalendarDoesNotIncludePendingPreviewAllocations(t *testing.T) {
 		t.Fatalf("calendar failed: %d %s", res.Code, res.Body.String())
 	}
 	var payload struct {
-		Allocations []calendarAllocation `json:"allocations"`
+		Allocations        []calendarAllocation `json:"allocations"`
+		PendingAllocations []calendarAllocation `json:"pendingAllocations"`
 	}
 	if err := json.Unmarshal(res.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("decode calendar response: %v", err)
 	}
 	if len(payload.Allocations) != 0 {
 		t.Fatalf("pending preview allocations should not affect monthly calendar, got %+v", payload.Allocations)
+	}
+	if len(payload.PendingAllocations) == 0 || payload.PendingAllocations[0].OrderID != pendingOrderID || payload.PendingAllocations[0].Status != domain.StatusPending {
+		t.Fatalf("expected pending backlog preview allocation to be separate, got %+v", payload.PendingAllocations)
 	}
 }
 

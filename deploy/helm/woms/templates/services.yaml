@@ -21,7 +21,12 @@ metadata:
   labels:
     {{- include "woms.labels" . | nindent 4 }}
     app.kubernetes.io/component: web
+  {{- with .Values.web.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
+  type: {{ .Values.web.service.type }}
   selector:
     app.kubernetes.io/instance: {{ .Release.Name }}
     app.kubernetes.io/component: web
@@ -29,3 +34,8 @@ spec:
     - name: http
       port: 8080
       targetPort: http
+    {{- if .Values.web.metrics.enabled }}
+    - name: metrics
+      port: {{ .Values.web.metrics.port }}
+      targetPort: metrics
+    {{- end }}
