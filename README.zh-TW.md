@@ -329,6 +329,8 @@ http(s)://<ingress.host>/grafana
 
 Helm 中的 Grafana anonymous access 已停用。當 `monitoring.grafana.admin.existingSecret` 為空時，chart 會建立 `woms-woms-grafana-admin` Secret 並產生密碼。正式環境應自行建立 Secret，並設定 `monitoring.grafana.admin.existingSecret`、`monitoring.grafana.admin.userKey` 與 `monitoring.grafana.admin.passwordKey`。使用者必須登入 Grafana 後才能觀察監控儀錶板。若使用預設產生的 Secret，可用 `kubectl get secret woms-woms-grafana-admin -n woms -o jsonpath='{.data.admin-password}' | base64 -d` 取出密碼。
 
+Grafana 會在 `WOMS` folder provision 兩張 dashboard：`WOMS Monitoring` 保留 API request、latency、status 與 Go runtime panels；`WOMS web autoscaling` 顯示 active HPA 使用的 web NGINX request-rate 訊號。
+
 如果瀏覽器在另一台 Windows 主機，而 WOMS 跑在 VM `192.168.56.101`，先從 Windows 建立 SSH tunnel：
 
 ```powershell

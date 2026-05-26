@@ -326,6 +326,8 @@ In Helm/Kubernetes, the web container proxies `/api/` to `API_UPSTREAM`, which t
 
 Grafana anonymous access is disabled in Helm. The chart creates a `woms-woms-grafana-admin` Secret with a generated password when `monitoring.grafana.admin.existingSecret` is empty. Production deployments should create their own Secret and set `monitoring.grafana.admin.existingSecret`, `monitoring.grafana.admin.userKey`, and `monitoring.grafana.admin.passwordKey`. Users must sign in to Grafana before they can observe monitoring dashboards. For the generated default Secret, retrieve the password with `kubectl get secret woms-woms-grafana-admin -n woms -o jsonpath='{.data.admin-password}' | base64 -d`.
 
+Grafana provisions two WOMS dashboards in the `WOMS` folder: `WOMS Monitoring` keeps the API request, latency, status, and Go runtime panels, while `WOMS web autoscaling` shows the web NGINX request-rate signal used by the active HPA.
+
 If the browser runs on a Windows host and WOMS runs on VM `192.168.56.101`, create an SSH tunnel from Windows first:
 
 ```powershell
