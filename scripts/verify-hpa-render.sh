@@ -11,6 +11,7 @@ if [ -n "$VALUES_FILE" ]; then
   values_args="-f $VALUES_FILE"
 fi
 cleanup_files=""
+trap '[ -z "$cleanup_files" ] || rm -f $cleanup_files' EXIT
 
 if [ -n "$RENDERED_MANIFEST" ]; then
   rendered="$RENDERED_MANIFEST"
@@ -63,7 +64,6 @@ fi
 
 metrics_disabled="$(mktemp)"
 cleanup_files="$cleanup_files $metrics_disabled"
-trap 'rm -f $cleanup_files' EXIT
 # shellcheck disable=SC2086
 helm template "$RELEASE" "$CHART" --dependency-update --namespace "$NAMESPACE" $values_args --set web.metrics.enabled=false >"$metrics_disabled"
 if grep -q "kind: ScaledObject" "$metrics_disabled"; then

@@ -144,6 +144,8 @@ test("compose NGINX status allows the separate exporter container", () => {
   assert.match(nginxStatus, /stub_status;/);
   assert.match(nginxStatus, /allow 127\.0\.0\.1;/);
   assert.match(nginxStatus, /allow 172\.16\.0\.0\/12;/);
+  assert.doesNotMatch(nginxStatus, /allow 10\.0\.0\.0\/8;/);
+  assert.doesNotMatch(nginxStatus, /allow 192\.168\.0\.0\/16;/);
   assert.match(nginxStatus, /deny all;/);
 });
 
@@ -156,6 +158,7 @@ test("web nginx proxies Grafana under the local 8081 web URL", () => {
 
   assert.match(compose, /"8081:8080"/);
   assert.doesNotMatch(compose, /"80:8080"/);
+  assert.doesNotMatch(compose, /"9113:9113"/);
   assert.match(compose, /GRAFANA_UPSTREAM:\s+\$\{GRAFANA_UPSTREAM:-grafana:3000\}/);
   assert.match(compose, /GF_AUTH_ANONYMOUS_ENABLED:\s+"false"/);
   assert.doesNotMatch(compose, /GF_AUTH_ANONYMOUS_ENABLED:\s+"true"/);

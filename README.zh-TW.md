@@ -368,8 +368,6 @@ hey -z 5m -c 80 "https://${INGRESS_HOST}/"
 
 透過 `/grafana/` 開啟 Grafana，查看 `WOMS web autoscaling` dashboard。`Per-pod NGINX req/s` panel 與 KEDA 使用同一條 query；壓測時 per-pod request rate 應上升，HPA 應增加 web replicas，`NGINX req/s by web pod` panel 應顯示流量分散到新 pods。
 
-歷史 Gthulhu 文件保留在 `docs/` 僅供參考。active Helm chart 已不再 vendoring 或 render Gthulhu chart、`PodSchedulingMetrics`、worker Kafka lag KEDA trigger、worker CPU trigger 或 Gthulhu Prometheus trigger。
-
 ### API And Web High Availability Demo
 
 HPA 之外的 high availability 情境是 request path 的 voluntary disruption protection。API 與 web 預設各有兩個 replicas，Helm chart 會建立 `PodDisruptionBudget` `woms-woms-api` 與 `woms-woms-web`，並設定 `minAvailable: 1`。當 node drain、cluster upgrade 或其他 voluntary eviction 發生時，Kubernetes 必須保留至少一個 API pod 與一個 web pod 可服務。

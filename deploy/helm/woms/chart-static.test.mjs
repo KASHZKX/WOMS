@@ -38,6 +38,8 @@ test("Helm values keep async scheduling dependencies separate from web autoscali
   assert.match(values, /databaseUrl:\s+postgres:\/\/woms:woms@postgres:5432\/woms\?sslmode=disable/);
   assert.match(values, /redisAddr:\s+redis-master:6379/);
   assert.match(values, /kafkaPublishEnabled:\s+"true"/);
+  assert.doesNotMatch(values, /scheduleTopic:\s+woms\.schedule\.jobs/);
+  assert.doesNotMatch(values, /kafkaBrokers:\s+kafka:9092/);
   assert.doesNotMatch(kedaBlock, /kafka:/);
   assert.doesNotMatch(kedaBlock, /cpu:/);
   assert.doesNotMatch(kedaBlock, /gthulhu:/);
@@ -103,6 +105,7 @@ test("Verification scripts cover the web HPA render and ingress or LoadBalancer 
   assert.match(hpaRenderScript, /woms_web_nginx_requests_per_second_per_pod/);
   assert.match(hpaRenderScript, /type:\s+prometheus/);
   assert.match(hpaRenderScript, /web\.metrics\.enabled=false/);
+  assert.match(hpaRenderScript, /trap '\[ -z "\$cleanup_files" \] \|\| rm -f \$cleanup_files' EXIT/);
   assert.match(hpaRenderScript, /unexpected Kafka KEDA trigger/);
   assert.match(hpaRenderScript, /unexpected Gthulhu resources/);
   assert.match(hpaBehaviorScript, /WEB_DEPLOY="\$\{RELEASE\}-woms-web"/);
@@ -111,6 +114,10 @@ test("Verification scripts cover the web HPA render and ingress or LoadBalancer 
   assert.match(hpaBehaviorScript, /LoadBalancer/);
   assert.match(hpaBehaviorScript, /nginx_http_requests_total/);
   assert.match(hpaBehaviorScript, /duration_seconds/);
+  assert.match(hpaBehaviorScript, /initial_ready="\$\(current_ready_replicas\)"/);
+  assert.match(hpaBehaviorScript, /target_replicas=\$\(\(baseline \+ 1\)\)/);
+  assert.match(hpaBehaviorScript, /wait_hpa_desired_replicas "\$target_replicas"/);
+  assert.match(hpaBehaviorScript, /wait_replicas "\$target_replicas" ge/);
   assert.doesNotMatch(hpaBehaviorScript, /HPA_SCENARIO/);
   assert.doesNotMatch(hpaBehaviorScript, /WORKER_DEPLOY/);
 });
@@ -132,6 +139,8 @@ test("Kafka topic hook remains for async scheduling but is not an autoscaling tr
   assert.match(kafkaTopicJob, /topic=\{\{ \.Values\.scheduleQueue\.topic \| quote \}\}/);
   assert.match(kafkaTopicJob, /bootstrap=\{\{ tpl \.Values\.scheduleQueue\.bootstrapServers \. \| quote \}\}/);
   assert.doesNotMatch(kafkaTopicJob, /\.Values\.keda\.kafka/);
+  assert.match(apiDeployment, /name:\s+KAFKA_BROKERS[\s\S]*\.Values\.scheduleQueue\.bootstrapServers/);
+  assert.match(apiDeployment, /name:\s+KAFKA_SCHEDULE_TOPIC[\s\S]*\.Values\.scheduleQueue\.topic/);
   assert.match(workerDeployment, /name:\s+KAFKA_BROKERS[\s\S]*\.Values\.scheduleQueue\.bootstrapServers/);
   assert.match(workerDeployment, /name:\s+KAFKA_CONSUMER_GROUP[\s\S]*\.Values\.scheduleQueue\.consumerGroup/);
   assert.match(workerDeployment, /replicas:\s+\{\{ \.Values\.worker\.replicaCount \}\}/);

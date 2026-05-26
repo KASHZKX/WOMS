@@ -136,8 +136,6 @@ services:
     depends_on:
       web:
         condition: service_healthy
-    ports:
-      - "9113:9113"
 
   # ─── Monitoring Stack ───────────────────────────────────────────
   # Gthulhu: infrastructure metrics agent for Postgres, Redis, Kafka

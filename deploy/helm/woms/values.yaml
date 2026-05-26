@@ -21,8 +21,6 @@ api:
     demoSeedData: "true"
     databaseUrl: postgres://woms:woms@postgres:5432/woms?sslmode=disable
     redisAddr: redis-master:6379
-    kafkaBrokers: kafka:9092
-    scheduleTopic: woms.schedule.jobs
     kafkaPublishEnabled: "true"
     corsAllowedOrigin: "*"
     authMode: local

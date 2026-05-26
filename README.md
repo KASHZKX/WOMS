@@ -365,8 +365,6 @@ For a cluster that intentionally exposes the web Service as a LoadBalancer inste
 
 Open Grafana through `/grafana/` and inspect `WOMS web autoscaling`. The `Per-pod NGINX req/s` panel uses the same query as KEDA; during load, the per-pod request rate should rise, the HPA should increase web replicas, and the `NGINX req/s by web pod` panel should show traffic distributed across the new pods.
 
-Historical Gthulhu documentation remains in `docs/` for reference only. The active Helm chart no longer vendors or renders the Gthulhu chart, `PodSchedulingMetrics`, worker Kafka lag KEDA trigger, worker CPU trigger, or Gthulhu Prometheus trigger.
-
 ### API And Web High Availability Demo
 
 The non-HPA high-availability scenario is voluntary disruption protection for the request path. API and web run with two replicas by default, and the Helm chart creates `PodDisruptionBudget` resources `woms-woms-api` and `woms-woms-web` with `minAvailable: 1`. During node drain, cluster upgrades, or other voluntary evictions, Kubernetes must keep at least one API pod and one web pod available.

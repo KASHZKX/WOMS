@@ -42,9 +42,9 @@ spec:
             - name: REDIS_ADDR
               value: {{ .Values.api.env.redisAddr | quote }}
             - name: KAFKA_BROKERS
-              value: {{ .Values.api.env.kafkaBrokers | quote }}
+              value: {{ tpl .Values.scheduleQueue.bootstrapServers . | quote }}
             - name: KAFKA_SCHEDULE_TOPIC
-              value: {{ .Values.api.env.scheduleTopic | quote }}
+              value: {{ .Values.scheduleQueue.topic | quote }}
             - name: KAFKA_CONSUMER_GROUP
               value: {{ .Values.scheduleQueue.consumerGroup | quote }}
             - name: KAFKA_PUBLISH_ENABLED
