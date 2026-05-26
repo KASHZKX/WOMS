@@ -77,7 +77,7 @@ test("KEDA ScaledObject targets the web Deployment using Prometheus per-pod NGIN
 test("Web deployment exposes NGINX traffic metrics behind the ingress-backed ClusterIP service", () => {
   assert.match(values, /web:[\s\S]*service:[\s\S]*type:\s+ClusterIP/);
   assert.match(values, /metrics:[\s\S]*repository:\s+nginx\/nginx-prometheus-exporter/);
-  assert.match(webDeployment, /replicas:\s+\{\{ ternary \.Values\.keda\.minReplicaCount \.Values\.web\.replicaCount \.Values\.keda\.enabled \}\}/);
+  assert.match(webDeployment, /replicas:\s+\{\{ ternary \.Values\.keda\.minReplicaCount \.Values\.web\.replicaCount \(and \.Values\.keda\.enabled \.Values\.web\.metrics\.enabled\) \}\}/);
   assert.match(webDeployment, /name:\s+nginx-exporter/);
   assert.match(webDeployment, /-nginx\.scrape-uri=\{\{ \.Values\.web\.metrics\.scrapeUri \}\}/);
   assert.match(webDeployment, /name:\s+metrics[\s\S]*containerPort:\s+\{\{ \.Values\.web\.metrics\.port \}\}/);
@@ -91,6 +91,7 @@ test("Prometheus and Grafana use the same web NGINX traffic signal as KEDA", () 
   assert.match(prometheusConfig, /job_name:\s+woms-api/);
   assert.match(prometheusConfig, /job_name:\s+woms-web-nginx/);
   assert.match(prometheusConfig, /regex:\s+\{\{ include "woms\.fullname" \. \}\}-web/);
+  assert.match(prometheusConfig, /source_labels:\s+\[__meta_kubernetes_pod_name\][\s\S]*target_label:\s+pod/);
   assert.match(grafanaConfig, /\.Files\.Glob "dashboards\/\*\.json"/);
   assert.match(grafanaConfig, /replace "__WOMS_NAMESPACE__" \$\.Release\.Namespace/);
   assert.doesNotMatch(grafanaConfig, /__WOMS_WORKER_REGEX__/);
@@ -105,6 +106,9 @@ test("Verification scripts cover the web HPA render and ingress or LoadBalancer 
   assert.match(hpaRenderScript, /woms_web_nginx_requests_per_second_per_pod/);
   assert.match(hpaRenderScript, /type:\s+prometheus/);
   assert.match(hpaRenderScript, /web\.metrics\.enabled=false/);
+  assert.match(hpaRenderScript, /assert_manifest_contains "Deployment" "\$\{RELEASE\}-woms-web" "  replicas: 2"/);
+  assert.match(hpaRenderScript, /target_label: pod/);
+  assert.match(hpaRenderScript, /assert_manifest_contains "Deployment" "\$\{RELEASE\}-woms-web" "  replicas: 4"/);
   assert.match(hpaRenderScript, /trap '\[ -z "\$cleanup_files" \] \|\| rm -f \$cleanup_files' EXIT/);
   assert.match(hpaRenderScript, /unexpected Kafka KEDA trigger/);
   assert.match(hpaRenderScript, /unexpected Gthulhu resources/);

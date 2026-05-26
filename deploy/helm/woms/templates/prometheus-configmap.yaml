@@ -48,6 +48,8 @@ data:
           - source_labels: [__meta_kubernetes_endpoint_port_name]
             action: keep
             regex: {{ .Values.monitoring.prometheus.scrape.web.port }}
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
           - target_label: service
             replacement: woms-web
           - target_label: namespace

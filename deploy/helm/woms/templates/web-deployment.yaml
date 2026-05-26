@@ -6,7 +6,7 @@ metadata:
     {{- include "woms.labels" . | nindent 4 }}
     app.kubernetes.io/component: web
 spec:
-  replicas: {{ ternary .Values.keda.minReplicaCount .Values.web.replicaCount .Values.keda.enabled }}
+  replicas: {{ ternary .Values.keda.minReplicaCount .Values.web.replicaCount (and .Values.keda.enabled .Values.web.metrics.enabled) }}
   selector:
     matchLabels:
       app.kubernetes.io/instance: {{ .Release.Name }}
