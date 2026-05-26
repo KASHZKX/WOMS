@@ -17,6 +17,7 @@ const grafanaConfig = readFileSync(new URL("./templates/grafana-configmap.yaml",
 const grafanaDeployment = readFileSync(new URL("./templates/grafana-deployment.yaml", import.meta.url), "utf8");
 const grafanaSecret = readFileSync(new URL("./templates/grafana-secret.yaml", import.meta.url), "utf8");
 const dashboard = readFileSync(new URL("./dashboards/woms-monitoring.json", import.meta.url), "utf8");
+const composePrometheus = readFileSync(new URL("../../../monitoring/prometheus.yml", import.meta.url), "utf8");
 const hpaBehaviorScript = readFileSync(new URL("../../../scripts/verify-hpa-behavior.sh", import.meta.url), "utf8");
 const hpaRenderScript = readFileSync(new URL("../../../scripts/verify-hpa-render.sh", import.meta.url), "utf8");
 const kafkaTopicJob = readFileSync(new URL("./templates/kafka-topic-job.yaml", import.meta.url), "utf8");
@@ -94,11 +95,15 @@ test("Prometheus and Grafana use the same web NGINX traffic signal as KEDA", () 
   assert.match(prometheusConfig, /source_labels:\s+\[__meta_kubernetes_pod_name\][\s\S]*target_label:\s+pod/);
   assert.match(grafanaConfig, /\.Files\.Glob "dashboards\/\*\.json"/);
   assert.match(grafanaConfig, /replace "__WOMS_NAMESPACE__" \$\.Release\.Namespace/);
+  assert.doesNotMatch(grafanaConfig, /__WOMS_WEB_REGEX__/);
   assert.doesNotMatch(grafanaConfig, /__WOMS_WORKER_REGEX__/);
   assert.match(dashboard, /Per-pod NGINX req\/s/);
   assert.match(dashboard, /sum\(rate\(nginx_http_requests_total\{job=\\"woms-web-nginx\\",namespace=\\"__WOMS_NAMESPACE__\\"\}\[1m\]\)\) \/ clamp_min\(count\(up\{job=\\"woms-web-nginx\\"/);
   assert.match(dashboard, /NGINX req\/s by web pod/);
   assert.match(dashboard, /nginx_connections_active/);
+  assert.match(composePrometheus, /job_name:\s+woms-web-nginx/);
+  assert.match(composePrometheus, /service:\s+woms-web/);
+  assert.doesNotMatch(composePrometheus, /pod:\s+compose-web-1/);
 });
 
 test("Verification scripts cover the web HPA render and ingress or LoadBalancer behavior flow", () => {

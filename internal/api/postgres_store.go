@@ -796,7 +796,7 @@ func (s *PostgresStore) ScheduleCalendar(lineID, month string, claims auth.Claim
 		if err != nil {
 			return calendarResponse{}, err
 		}
-		currentDate, err := currentDateInLineTimezone(line, time.Now().UTC())
+		currentDate, err := currentDateInLineTimezone(line, nowUTC())
 		if err != nil {
 			return calendarResponse{}, err
 		}

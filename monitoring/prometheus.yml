@@ -19,7 +19,6 @@ scrape_configs:
           - nginx-exporter:9113
         labels:
           namespace: woms
-          pod: compose-web-1
           service: woms-web
 
   # ── Gthulhu infrastructure metrics (Postgres/Redis/Kafka) ──────
