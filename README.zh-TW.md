@@ -144,6 +144,12 @@ go test ./...
 npm run test:web
 ```
 
+顯示 Go 與 JavaScript coverage 百分比：
+
+```bash
+npm run test:coverage
+```
+
 執行 API：
 
 ```bash
@@ -432,8 +438,8 @@ kubectl uncordon <node-name>
 
 GitHub Actions 會執行：
 
-- `go test ./...`
-- `npm run test:web`
+- `npm run test:go:coverage`，輸出 Go package 與 total statement coverage
+- `npm run test:web:coverage`，輸出 JavaScript line、branch 與 function coverage
 - `gofmt` check
 - API、worker 與 web Docker builds
 - Helm rendering

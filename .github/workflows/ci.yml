@@ -38,8 +38,8 @@ jobs:
             exit 1
           fi
 
-      - name: Run tests
-        run: go test ./...
+      - name: Run tests with coverage
+        run: ./scripts/go-coverage.sh
 
   web-test:
     runs-on: ubuntu-latest
@@ -52,8 +52,8 @@ jobs:
         with:
           node-version: "22"
 
-      - name: Run web mock tests
-        run: npm run test:web
+      - name: Run web mock tests with coverage
+        run: npm run test:web:coverage
 
   docker-build:
     runs-on: ubuntu-latest

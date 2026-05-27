@@ -141,6 +141,13 @@ Run tests:
 
 ```bash
 go test ./...
+npm run test:web
+```
+
+Show Go and JavaScript coverage percentages:
+
+```bash
+npm run test:coverage
 ```
 
 Run the API:
@@ -429,8 +436,8 @@ kubectl uncordon <node-name>
 
 GitHub Actions runs:
 
-- `go test ./...`
-- `npm run test:web`
+- `npm run test:go:coverage`, which prints package and total Go statement coverage
+- `npm run test:web:coverage`, which prints JavaScript line, branch, and function coverage
 - `gofmt` check
 - API, worker, and web Docker builds
 - Helm rendering
