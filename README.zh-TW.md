@@ -150,6 +150,14 @@ npm run test:web
 npm run test:coverage
 ```
 
+需要 Sonar 可讀取的 JavaScript LCOV 檔案時，執行：
+
+```bash
+npm run test:web:coverage
+```
+
+這會寫出 `coverage/lcov.info`；Go coverage 指令會寫出 `coverage.out`。
+
 執行 API：
 
 ```bash
@@ -440,6 +448,7 @@ GitHub Actions 會執行：
 
 - `npm run test:go:coverage`，輸出 Go package 與 total statement coverage
 - `npm run test:web:coverage`，輸出 JavaScript line、branch 與 function coverage
+- 設定 `SONAR_PROJECT_KEY` 時執行 optional SonarQube/SonarQube Cloud analysis
 - `gofmt` check
 - API、worker 與 web Docker builds
 - Helm rendering
@@ -453,6 +462,13 @@ GitHub Actions 會執行：
 - Secret：`DOCKERHUB_TOKEN`
 - Variable：`DOCKERHUB_USERNAME`
 - Variable：`DOCKERHUB_NAMESPACE`
+
+可選 Sonar 設定：
+
+- Secret：`SONAR_TOKEN`
+- Variable：`SONAR_PROJECT_KEY`
+- SonarQube Cloud 使用 Variable：`SONAR_ORGANIZATION`
+- Self-hosted SonarQube Server 使用 Variable：`SONAR_HOST_URL`
 
 Image tags 會包含 release tag 與 `latest`，用於受保護的 main/release publish flow。`docker-publish` workflow 會把 release tag 寫回 `deploy/helm/woms/values.yaml` 並使用 `[skip ci]` commit，然後建立對應 Git tag。
 

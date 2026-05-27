@@ -150,6 +150,14 @@ Show Go and JavaScript coverage percentages:
 npm run test:coverage
 ```
 
+Run the JavaScript coverage command when a Sonar-compatible LCOV file is needed:
+
+```bash
+npm run test:web:coverage
+```
+
+That writes `coverage/lcov.info`; the Go coverage command writes `coverage.out`.
+
 Run the API:
 
 ```bash
@@ -438,6 +446,7 @@ GitHub Actions runs:
 
 - `npm run test:go:coverage`, which prints package and total Go statement coverage
 - `npm run test:web:coverage`, which prints JavaScript line, branch, and function coverage
+- Optional SonarQube/SonarQube Cloud analysis when `SONAR_PROJECT_KEY` is configured
 - `gofmt` check
 - API, worker, and web Docker builds
 - Helm rendering
@@ -451,6 +460,13 @@ Required GitHub repository settings:
 - Secret: `DOCKERHUB_TOKEN`
 - Variable: `DOCKERHUB_USERNAME`
 - Variable: `DOCKERHUB_NAMESPACE`
+
+Optional Sonar settings:
+
+- Secret: `SONAR_TOKEN`
+- Variable: `SONAR_PROJECT_KEY`
+- Variable: `SONAR_ORGANIZATION` for SonarQube Cloud
+- Variable: `SONAR_HOST_URL` for self-hosted SonarQube Server
 
 Image tags include the release tag and `latest` for the protected main/release publish flow. The `docker-publish` workflow commits the release tag back into `deploy/helm/woms/values.yaml` with `[skip ci]`, then creates the matching Git tag.
 

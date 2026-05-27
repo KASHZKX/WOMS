@@ -12,6 +12,7 @@ coverage.out
 coverage/
 coverage.html
 *.lcov
+.scannerwork/
 *.test
 .gocache/
 .gomodcache/

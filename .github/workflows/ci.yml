@@ -52,8 +52,99 @@ jobs:
         with:
           node-version: "22"
 
+      - name: Install Node dependencies
+        run: npm ci
+
       - name: Run web mock tests with coverage
         run: npm run test:web:coverage
+
+  quality-scan:
+    runs-on: ubuntu-latest
+    needs:
+      - test
+      - web-test
+    if: ${{ vars.SONAR_PROJECT_KEY != '' }}
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check Sonar configuration
+        id: sonar
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}
+          SONAR_ORGANIZATION: ${{ vars.SONAR_ORGANIZATION }}
+        run: |
+          if [ -z "$SONAR_TOKEN" ]; then
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "SONAR_TOKEN is not configured; skipping Sonar scan."
+            exit 0
+          fi
+          if [ -n "$SONAR_HOST_URL" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "mode=server" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ -n "$SONAR_ORGANIZATION" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "mode=cloud" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "enabled=false" >> "$GITHUB_OUTPUT"
+          echo "Set SONAR_ORGANIZATION for SonarQube Cloud or SONAR_HOST_URL for SonarQube Server."
+
+      - name: Set up Go
+        if: ${{ steps.sonar.outputs.enabled == 'true' }}
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Set up Node
+        if: ${{ steps.sonar.outputs.enabled == 'true' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Node dependencies
+        if: ${{ steps.sonar.outputs.enabled == 'true' }}
+        run: npm ci
+
+      - name: Generate Go coverage
+        if: ${{ steps.sonar.outputs.enabled == 'true' }}
+        run: ./scripts/go-coverage.sh
+
+      - name: Generate JavaScript LCOV coverage
+        if: ${{ steps.sonar.outputs.enabled == 'true' }}
+        run: npm run test:web:coverage
+
+      - name: Scan with SonarQube Cloud
+        if: ${{ steps.sonar.outputs.enabled == 'true' && steps.sonar.outputs.mode == 'cloud' }}
+        uses: SonarSource/sonarqube-scan-action@v7
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        with:
+          args: >
+            -Dsonar.projectKey=${{ vars.SONAR_PROJECT_KEY }}
+            -Dsonar.organization=${{ vars.SONAR_ORGANIZATION }}
+
+      - name: Scan with SonarQube Server
+        if: ${{ steps.sonar.outputs.enabled == 'true' && steps.sonar.outputs.mode == 'server' }}
+        uses: SonarSource/sonarqube-scan-action@v7
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}
+        with:
+          args: >
+            -Dsonar.projectKey=${{ vars.SONAR_PROJECT_KEY }}
+
+      - name: Explain skipped Sonar scan
+        if: ${{ steps.sonar.outputs.enabled != 'true' }}
+        run: echo "Sonar scan skipped."
 
   docker-build:
     runs-on: ubuntu-latest
