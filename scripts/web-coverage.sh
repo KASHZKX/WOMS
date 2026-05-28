@@ -14,13 +14,13 @@ case "${WOMS_COVERAGE_POLICY:-short-term}" in
     ;;
 esac
 
+mkdir -p coverage
 set +e
-coverage_output="$(node --test --experimental-test-coverage web/*.test.mjs deploy/helm/woms/*.test.mjs 2>&1)"
+coverage_output="$(node --test --experimental-test-coverage --test-reporter=tap --test-reporter-destination=stdout --test-reporter=lcov --test-reporter-destination=coverage/lcov.info web/*.test.mjs deploy/helm/woms/*.test.mjs 2>&1)"
 status="$?"
 set -e
 
 printf '%s\n' "$coverage_output"
-mkdir -p coverage
 printf '%s\n' "$coverage_output" > coverage/web-coverage.txt
 
 if [ "$status" -ne 0 ]; then
