@@ -150,6 +150,14 @@ npm run test:web
 npm run test:coverage
 ```
 
+在 Docker 中執行本機 SonarScanner，並掃描本機 SonarQube 伺服器：
+
+```bash
+SONAR_TOKEN=... npm run sonar
+```
+
+scanner 會透過 `sonarsource/sonar-scanner-cli:latest` 執行、讀取 `sonar-project.properties`，並使用既有測試腳本產生的 coverage 檔案：Go 的 `coverage.out`，以及 web 測試的 `coverage/lcov.info`。因為 scanner 在 container 內執行，預設 `SONAR_HOST_URL` 是 `http://host.docker.internal:9000`。若 SonarQube 跑在自訂 Docker network，可覆寫 `SONAR_HOST_URL`、`SONAR_SCANNER_IMAGE`，或設定 `SONAR_DOCKER_NETWORK`。
+
 執行 API：
 
 ```bash

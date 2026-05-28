@@ -6,7 +6,8 @@
     "test:coverage": "npm run test:go:coverage && npm run test:web:coverage",
     "test:go:coverage": "./scripts/go-coverage.sh",
     "test:web": "node --test web/*.test.mjs deploy/helm/woms/*.test.mjs",
-    "test:web:coverage": "node --test --experimental-test-coverage web/*.test.mjs deploy/helm/woms/*.test.mjs"
+    "test:web:coverage": "node --test --experimental-test-coverage web/*.test.mjs deploy/helm/woms/*.test.mjs",
+    "sonar": "sh ./scripts/sonar-scan.sh"
   },
   "engines": {
     "node": ">=22"

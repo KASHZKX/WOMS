@@ -150,6 +150,14 @@ Show Go and JavaScript coverage percentages:
 npm run test:coverage
 ```
 
+Run SonarScanner locally in Docker against a local SonarQube server:
+
+```bash
+SONAR_TOKEN=... npm run sonar
+```
+
+The scanner runs through `sonarsource/sonar-scanner-cli:latest`, reads `sonar-project.properties`, and uses the coverage files produced by the existing test scripts: `coverage.out` for Go and `coverage/lcov.info` for the web tests. The default `SONAR_HOST_URL` is `http://host.docker.internal:9000` because the scanner runs inside a container. Override `SONAR_HOST_URL`, `SONAR_SCANNER_IMAGE`, or set `SONAR_DOCKER_NETWORK` when SonarQube runs on a custom Docker network.
+
 Run the API:
 
 ```bash
