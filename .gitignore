@@ -9,6 +9,8 @@
 # Go
 bin/
 coverage.out
+coverage/
+coverage.html
 *.test
 .gocache/
 .gomodcache/
