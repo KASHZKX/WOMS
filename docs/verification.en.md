@@ -7,6 +7,7 @@ This workstation was used only for static, unit, Go, and Helm render checks. Loc
 ```bash
 npm run test:web
 go test ./...
+npm run test:coverage
 helm template woms ./deploy/helm/woms --namespace woms
 ./scripts/verify-hpa-render.sh
 test -z "$(gofmt -l .)"
@@ -16,12 +17,32 @@ Expected:
 
 - Frontend and Helm static tests pass.
 - Go tests pass.
+- Fast coverage passes the current short-term gate. `npm run test:go:coverage` writes `coverage.out`; `npm run test:web:coverage` prints Node coverage and enforces the web line threshold.
 - Helm renders `Deployment/api`, `Deployment/worker`, `Deployment/web`, Prometheus/Grafana, the web `ScaledObject`, and PDBs.
 - `ScaledObject` targets `Deployment/woms-woms-web` and creates HPA `woms-woms-web-hpa`.
 - Active KEDA triggers contain only the Prometheus trigger for `woms_web_nginx_requests_per_second_per_pod`.
 - Rendered manifests do not include worker Kafka lag, worker CPU, Gthulhu Prometheus triggers, `PodSchedulingMetrics`, or the Gthulhu child chart.
 
-## 2. Manual Browser UI Verification
+## 2. Manual Integration Coverage
+
+PostgreSQL and Redis integration tests are manual checks. They run either through the GitHub Actions `manual-integration-coverage` workflow or against developer-provided services. Docker Compose is not the standard local integration fixture runner for these tests.
+
+Run against developer-provided services:
+
+```bash
+WOMS_INTEGRATION_TESTS=1 DATABASE_URL=postgres://... npm run test:integration
+WOMS_INTEGRATION_TESTS=1 REDIS_ADDR=127.0.0.1:6379 npm run test:integration
+WOMS_INTEGRATION_TESTS=1 DATABASE_URL=postgres://... REDIS_ADDR=127.0.0.1:6379 npm run test:integration
+```
+
+Expected:
+
+- Missing `WOMS_INTEGRATION_TESTS=1` skips the command with a clear message.
+- Missing `DATABASE_URL` skips only PostgreSQL packages.
+- Missing `REDIS_ADDR` skips only Redis packages.
+- The manual CI workflow starts its own PostgreSQL and Redis services and uploads Go coverage profiles.
+
+## 3. Manual Browser UI Verification
 
 Run the app in a browser-capable environment, then verify:
 
@@ -53,7 +74,7 @@ Run the app in a browser-capable environment, then verify:
    - Click `已排程`: the main calendar shows persisted schedule allocations only.
    - Click `所有訂單`: the main calendar shows both sets, with pending backlog allocations using preview styling and pending status.
 
-## 3. GKE Ingress Or LoadBalancer Web HPA Verification
+## 4. GKE Ingress Or LoadBalancer Web HPA Verification
 
 Deploy to GKE or an equivalent Ingress/LoadBalancer-capable cluster:
 
@@ -110,7 +131,7 @@ Expected:
 - Traffic spreads across multiple web pods.
 - After traffic stops and cooldown passes, replicas scale down.
 
-## 4. API, RBAC, And Calendar API Checks
+## 5. API, RBAC, And Calendar API Checks
 
 ```bash
 JWT_SECRET=local-dev-secret go run ./cmd/api
@@ -125,7 +146,7 @@ Check role boundaries:
 - Scheduler A cannot read or mutate Scheduler B line data.
 - `GET /api/schedules/calendar?lineId=A&month=2026-05` returns persisted allocations for the authorized line.
 
-## 5. Docker And Web Proxy Checks
+## 6. Docker And Web Proxy Checks
 
 ```bash
 docker build -f Dockerfile.api -t woms-api:local .
@@ -141,9 +162,10 @@ Expected:
 - Grafana through web proxy: `http://localhost:8081/grafana`
 - Unauthenticated Grafana users see the Grafana login page.
 
-## 6. Completion Checklist
+## 7. Completion Checklist
 
 - Local non-UI tests pass.
+- Manual integration coverage is run in CI or against developer-provided services when release validation requires it.
 - Browser UI checks above are completed in a browser environment.
 - GKE LoadBalancer/HPA checks above are completed in a cluster environment.
 - README and both verification docs are updated in English and zh-TW.

@@ -230,6 +230,7 @@ const order = {
 };
 
 test("matchesOrder filters by id, customer, line, status, and priority", () => {
+  assert.equal(matchesOrder(order, ""), true);
   assert.equal(matchesOrder(order, "acme"), true);
   assert.equal(matchesOrder(order, "ORD-0000001".toLowerCase()), true);
   assert.equal(matchesOrder(order, "待排程"), true);
@@ -392,10 +393,21 @@ test("sales due date helpers allow only tomorrow or later", () => {
   assert.equal(unacceptableDueDateMessage, "無法被接受的交期");
 });
 
+test("tomorrowDateKey crosses month year and leap-year boundaries", () => {
+  assert.equal(tomorrowDateKey("2026-01-31"), "2026-02-01");
+  assert.equal(tomorrowDateKey("2026-12-31"), "2027-01-01");
+  assert.equal(tomorrowDateKey("2028-02-28"), "2028-02-29");
+});
+
 test("dateKeyInTimeZone returns the plant-local calendar date", () => {
   const now = new Date("2026-05-04T16:30:00Z");
   assert.equal(dateKeyInTimeZone(now, "Asia/Taipei"), "2026-05-05");
   assert.equal(dateKeyInTimeZone(now, "America/New_York"), "2026-05-04");
+});
+
+test("dateKeyInTimeZone rejects invalid dates and falls back for invalid time zones", () => {
+  assert.equal(dateKeyInTimeZone("not-a-date", "Asia/Taipei"), "");
+  assert.equal(dateKeyInTimeZone(new Date("2026-05-04T16:30:00Z"), "Invalid/Zone"), "2026-05-04");
 });
 
 test("waterlineMetrics summarizes daily capacity usage", () => {
@@ -423,6 +435,46 @@ test("waterlineMetrics summarizes daily capacity usage", () => {
 
   const warning = waterlineMetrics([{ quantity: 8000 }]);
   assert.equal(warning.tone, "warning");
+});
+
+test("waterlineMetrics handles zero and negative capacity without division drift", () => {
+  const zeroCapacity = waterlineMetrics([{ quantity: 500 }], 0);
+  assert.equal(zeroCapacity.capacity, 0);
+  assert.equal(zeroCapacity.remaining, 0);
+  assert.equal(zeroCapacity.overloaded, true);
+  assert.equal(zeroCapacity.percent, 0);
+  assert.equal(zeroCapacity.remainingPercent, 0);
+  assert.equal(zeroCapacity.tone, "safe");
+  assert.equal(zeroCapacity.color, "hsl(210 88% 48%)");
+
+  const negativeCapacity = waterlineMetrics([{ quantity: 500 }], -100);
+  assert.equal(negativeCapacity.capacity, -100);
+  assert.equal(negativeCapacity.remaining, 0);
+  assert.equal(negativeCapacity.overloaded, true);
+  assert.equal(negativeCapacity.percent, 0);
+  assert.equal(negativeCapacity.remainingPercent, 0);
+});
+
+test("waterlineMetrics exposes safe warning danger and clamped colors", () => {
+  const safe = waterlineMetrics([{ quantity: 0 }], 10000);
+  assert.equal(safe.tone, "safe");
+  assert.equal(safe.color, "hsl(210 88% 48%)");
+
+  const warning = waterlineMetrics([{ quantity: 7000 }], 10000);
+  assert.equal(warning.tone, "warning");
+  assert.equal(warning.color, "hsl(54 88% 48%)");
+
+  const danger = waterlineMetrics([{ quantity: 9000 }], 10000);
+  assert.equal(danger.tone, "danger");
+  assert.equal(danger.color, "hsl(16 88% 48%)");
+
+  const overloaded = waterlineMetrics([{ quantity: 15000 }], 10000);
+  assert.equal(overloaded.tone, "danger");
+  assert.equal(overloaded.color, "hsl(0 88% 48%)");
+
+  const negativeTotal = waterlineMetrics([{ quantity: -100 }], 10000);
+  assert.equal(negativeTotal.tone, "safe");
+  assert.equal(negativeTotal.color, "hsl(210 88% 48%)");
 });
 
 test("conflictExplanation gives actionable guidance", () => {

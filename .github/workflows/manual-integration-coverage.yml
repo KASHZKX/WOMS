@@ -1,0 +1,95 @@
+name: manual-integration-coverage
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Integration target to run"
+        required: true
+        default: "all"
+        type: choice
+        options:
+          - all
+          - postgresql
+          - redis
+
+jobs:
+  postgresql-integration:
+    if: ${{ github.event.inputs.target == 'all' || github.event.inputs.target == 'postgresql' }}
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: woms_test
+          POSTGRES_USER: woms
+          POSTGRES_PASSWORD: woms
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U woms -d woms_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Run PostgreSQL integration tests with coverage
+        env:
+          WOMS_INTEGRATION_TESTS: "1"
+          DATABASE_URL: postgres://woms:woms@127.0.0.1:5432/woms_test?sslmode=disable
+        run: |
+          go test -run 'PostgreSQL|Postgres|Integration' -coverprofile=coverage-postgresql.out -covermode=atomic ./internal/api ./cmd/scheduler-worker
+          go tool cover -func=coverage-postgresql.out
+
+      - name: Upload PostgreSQL integration coverage
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: postgresql-integration-go-coverage
+          path: coverage-postgresql.out
+          if-no-files-found: error
+
+  redis-integration:
+    if: ${{ github.event.inputs.target == 'all' || github.event.inputs.target == 'redis' }}
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Run Redis integration tests with coverage
+        env:
+          WOMS_INTEGRATION_TESTS: "1"
+          REDIS_ADDR: 127.0.0.1:6379
+        run: |
+          go test -run 'Redis.*Integration|Integration.*Redis' -coverprofile=coverage-redis.out -covermode=atomic ./internal/api ./internal/lock
+          go tool cover -func=coverage-redis.out
+
+      - name: Upload Redis integration coverage
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: redis-integration-go-coverage
+          path: coverage-redis.out
+          if-no-files-found: error

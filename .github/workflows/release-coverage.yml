@@ -1,0 +1,52 @@
+name: release-coverage
+
+on:
+  workflow_dispatch:
+    inputs:
+      manual_integration_evidence:
+        description: "Manual PostgreSQL and Redis integration workflow run URLs or artifact references"
+        required: true
+  push:
+    branches:
+      - "release/**"
+
+jobs:
+  release-coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require manual integration evidence
+        run: |
+          if [ -z "${{ github.event.inputs.manual_integration_evidence }}" ]; then
+            echo "Release validation requires manual PostgreSQL and Redis integration coverage evidence."
+            echo "Run the manual-integration-coverage workflow first and provide the run URL or artifact references."
+            exit 1
+          fi
+          echo "${{ github.event.inputs.manual_integration_evidence }}"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Run long-term release coverage gate
+        env:
+          WOMS_COVERAGE_POLICY: long-term
+        run: npm run test:coverage
+
+      - name: Upload release coverage artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: release-coverage
+          path: |
+            coverage.out
+            coverage/**
+          if-no-files-found: warn

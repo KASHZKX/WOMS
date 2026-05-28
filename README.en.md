@@ -150,6 +150,18 @@ Show Go and JavaScript coverage percentages:
 npm run test:coverage
 ```
 
+The default fast coverage policy is the current short-term gate: Go total statement coverage must be at least `40.0%`, and web all-file line coverage must be at least `40.0%`. The scripts print both the actual and required percentages when a threshold fails. Future policy modes are available through `WOMS_COVERAGE_POLICY=medium-term` and `WOMS_COVERAGE_POLICY=long-term`; those modes are for branches where the matching API, Redis, PostgreSQL, scheduler, auth, and release integration coverage work is already present.
+
+Run manual integration tests only when PostgreSQL or Redis services already exist:
+
+```bash
+WOMS_INTEGRATION_TESTS=1 DATABASE_URL=postgres://... REDIS_ADDR=127.0.0.1:6379 npm run test:integration
+```
+
+`npm run test:integration` is intentionally manual. It requires `WOMS_INTEGRATION_TESTS=1` before running integration packages, skips clearly when `DATABASE_URL` or `REDIS_ADDR` is missing, and does not start Docker Compose as a fixture runner.
+
+GitHub Actions also provides a manual `manual-integration-coverage` workflow. It can start PostgreSQL, Redis, or both, runs the matching gated Go integration packages with coverage, and uploads the resulting coverage profiles. This workflow is `workflow_dispatch` only and does not publish Docker Hub images.
+
 Run SonarScanner locally in Docker against a local SonarQube server:
 
 ```bash
@@ -409,10 +421,13 @@ GitHub Actions runs:
 
 - `npm run test:go:coverage`, which prints package and total Go statement coverage
 - `npm run test:web:coverage`, which prints JavaScript line, branch, and function coverage
+- Fast Go and web coverage artifact uploads for CI inspection
 - `gofmt` check
 - API, worker, and web Docker builds
 - Helm rendering
 - Web HPA/KEDA render verification with `./scripts/verify-hpa-render.sh`
+- Manual PostgreSQL and Redis integration coverage through the `manual-integration-coverage` workflow
+- Long-term release coverage validation through the `release-coverage` workflow, which requires manual integration evidence before enforcing the long-term gate
 - Docker Hub push and tagging on `main`, `release/**`, or manual dispatch
 - Automatic Helm image tag update on `main`
 - Automatic Git tag creation on every successful `main` publish, using `v0.1.<run-number>` by default

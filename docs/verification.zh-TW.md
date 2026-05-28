@@ -7,6 +7,7 @@
 ```bash
 npm run test:web
 go test ./...
+npm run test:coverage
 helm template woms ./deploy/helm/woms --namespace woms
 ./scripts/verify-hpa-render.sh
 test -z "$(gofmt -l .)"
@@ -16,12 +17,32 @@ test -z "$(gofmt -l .)"
 
 - Frontend 與 Helm static tests 通過。
 - Go tests 通過。
+- Fast coverage 通過目前 short-term gate。`npm run test:go:coverage` 會寫出 `coverage.out`；`npm run test:web:coverage` 會輸出 Node coverage 並檢查 web line threshold。
 - Helm render 出 `Deployment/api`、`Deployment/worker`、`Deployment/web`、Prometheus/Grafana、web `ScaledObject` 與 PDB。
 - `ScaledObject` 指向 `Deployment/woms-woms-web`，並建立 HPA `woms-woms-web-hpa`。
 - Active KEDA triggers 只有 `woms_web_nginx_requests_per_second_per_pod` 的 Prometheus trigger。
 - Rendered manifests 不包含 worker Kafka lag、worker CPU、Gthulhu Prometheus triggers、`PodSchedulingMetrics` 或 Gthulhu child chart。
 
-## 2. 手動瀏覽器 UI 驗證
+## 2. 手動 Integration Coverage
+
+PostgreSQL 與 Redis integration tests 是手動檢查。它們透過 GitHub Actions 的 `manual-integration-coverage` workflow 執行，或連到開發者自行提供的服務。Docker Compose 不是這些 tests 的標準本機 integration fixture runner。
+
+連到開發者自行提供的服務執行：
+
+```bash
+WOMS_INTEGRATION_TESTS=1 DATABASE_URL=postgres://... npm run test:integration
+WOMS_INTEGRATION_TESTS=1 REDIS_ADDR=127.0.0.1:6379 npm run test:integration
+WOMS_INTEGRATION_TESTS=1 DATABASE_URL=postgres://... REDIS_ADDR=127.0.0.1:6379 npm run test:integration
+```
+
+期望：
+
+- 缺少 `WOMS_INTEGRATION_TESTS=1` 時，命令會用清楚訊息略過。
+- 缺少 `DATABASE_URL` 時，只略過 PostgreSQL packages。
+- 缺少 `REDIS_ADDR` 時，只略過 Redis packages。
+- Manual CI workflow 會啟動自己的 PostgreSQL 與 Redis services，並上傳 Go coverage profiles。
+
+## 3. 手動瀏覽器 UI 驗證
 
 在可使用瀏覽器的環境啟動 WOMS，逐項確認：
 
@@ -53,7 +74,7 @@ test -z "$(gofmt -l .)"
    - 點 `已排程`：主日曆只顯示正式 persisted schedule allocations。
    - 點 `所有訂單`：主日曆同時顯示兩者，pending backlog allocations 保留 preview 樣式與待排程狀態。
 
-## 3. GKE Ingress 或 LoadBalancer Web HPA 驗證
+## 4. GKE Ingress 或 LoadBalancer Web HPA 驗證
 
 部署到 GKE 或等價 Ingress/LoadBalancer-capable cluster：
 
@@ -110,7 +131,7 @@ Grafana：
 - 流量分散到多個 web pods。
 - 停止流量並等待 cooldown 後 replicas scale down。
 
-## 4. API、RBAC 與 Calendar API 檢查
+## 5. API、RBAC 與 Calendar API 檢查
 
 ```bash
 JWT_SECRET=local-dev-secret go run ./cmd/api
@@ -125,7 +146,7 @@ curl -i http://localhost:8080/internal/auth/verify
 - Scheduler A 不能讀取或修改 Scheduler B 產線資料。
 - `GET /api/schedules/calendar?lineId=A&month=2026-05` 會回授權產線的 persisted allocations。
 
-## 5. Docker 與 Web Proxy 檢查
+## 6. Docker 與 Web Proxy 檢查
 
 ```bash
 docker build -f Dockerfile.api -t woms-api:local .
@@ -141,9 +162,10 @@ docker compose up --build
 - 透過 web proxy 開啟 Grafana：`http://localhost:8081/grafana`
 - 未登入 Grafana 的使用者會看到 Grafana login page。
 
-## 6. 完成檢查清單
+## 7. 完成檢查清單
 
 - 本機非 UI 測試通過。
+- Release validation 需要時，已在 CI 或連到開發者自行提供的服務完成 manual integration coverage。
 - 已在瀏覽器環境完成上述 UI 檢查。
 - 已在 cluster 環境完成上述 GKE LoadBalancer/HPA 檢查。
 - README 與兩份 verification docs 都已同步更新英文與 zh-TW。

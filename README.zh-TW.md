@@ -150,6 +150,18 @@ npm run test:web
 npm run test:coverage
 ```
 
+預設 fast coverage policy 是目前可穩定通過的 short-term gate：Go total statement coverage 必須至少 `40.0%`，web all-file line coverage 必須至少 `40.0%`。門檻未通過時，scripts 會同時印出實際 coverage 與要求 coverage。未來 policy mode 可透過 `WOMS_COVERAGE_POLICY=medium-term` 與 `WOMS_COVERAGE_POLICY=long-term` 啟用；這些 mode 用於已具備對應 API、Redis、PostgreSQL、scheduler、auth 與 release integration coverage 的分支。
+
+只有在 PostgreSQL 或 Redis 服務已存在時，才手動執行 integration tests：
+
+```bash
+WOMS_INTEGRATION_TESTS=1 DATABASE_URL=postgres://... REDIS_ADDR=127.0.0.1:6379 npm run test:integration
+```
+
+`npm run test:integration` 是刻意保留的手動命令。它需要 `WOMS_INTEGRATION_TESTS=1` 才會執行 integration packages；缺少 `DATABASE_URL` 或 `REDIS_ADDR` 時會清楚顯示略過原因，且不會啟動 Docker Compose 作為 fixture runner。
+
+GitHub Actions 也提供 manual `manual-integration-coverage` workflow。它可以啟動 PostgreSQL、Redis 或兩者，執行對應 gated Go integration packages 並產生 coverage，最後上傳 coverage profiles。此 workflow 僅能透過 `workflow_dispatch` 執行，不會發布 Docker Hub images。
+
 在 Docker 中執行本機 SonarScanner，並掃描本機 SonarQube 伺服器：
 
 ```bash
@@ -411,10 +423,13 @@ GitHub Actions 會執行：
 
 - `npm run test:go:coverage`，輸出 Go package 與 total statement coverage
 - `npm run test:web:coverage`，輸出 JavaScript line、branch 與 function coverage
+- 上傳 fast Go 與 web coverage artifacts 供 CI 檢查
 - `gofmt` check
 - API、worker 與 web Docker builds
 - Helm rendering
 - 使用 `./scripts/verify-hpa-render.sh` 驗證 web HPA/KEDA render
+- 透過 `manual-integration-coverage` workflow 手動執行 PostgreSQL 與 Redis integration coverage
+- 透過 `release-coverage` workflow 執行 long-term release coverage validation，且在套用 long-term gate 前必須提供 manual integration evidence
 - 在 `main`、`release/**` 或 manual dispatch 時推送 Docker Hub image 與 tag
 - 在 `main` 自動更新 Helm image tag
 - 每次 `main` publish 成功後自動建立 Git tag，預設格式為 `v0.1.<run-number>`

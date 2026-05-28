@@ -222,7 +222,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleUserByUsername(rec, r)
 	case r.URL.Path == "/api/users":
 		s.handleUsers(rec, r)
-	case r.Method == http.MethodPost && r.URL.Path == "/api/demo/conflict-orders":
+	case r.URL.Path == "/api/demo/conflict-orders":
 		s.handleDemoConflictOrders(rec, r)
 	case r.URL.Path == "/api/demo/hpa-peak":
 		s.handleHPAPeakDemo(rec, r)
@@ -525,6 +525,10 @@ func (s *Server) handleUserByUsername(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDemoConflictOrders(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
 	claims, err := s.claimsFromRequest(r)
 	if err != nil {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
@@ -2304,6 +2308,8 @@ func (s *MemoryStore) CreateDemoConflictOrders(req demoConflictRequest, claims a
 		if err != nil {
 			return nil, err
 		}
+		s.audits[len(s.audits)-1].Action = "order.create_demo_conflict"
+		s.audits[len(s.audits)-1].Reason = req.DueDate
 		orders = append(orders, order)
 	}
 	return orders, nil

@@ -266,6 +266,9 @@ func readRedisValue(r *bufio.Reader) (string, error) {
 		if _, err := io.ReadFull(r, buf); err != nil {
 			return "", err
 		}
+		if string(buf[length:]) != "\r\n" {
+			return "", errors.New("malformed redis bulk string terminator")
+		}
 		return string(buf[:length]), nil
 	default:
 		return "", fmt.Errorf("unsupported redis response prefix %q", prefix)

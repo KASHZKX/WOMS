@@ -14,18 +14,14 @@ import (
 )
 
 func main() {
-	addr := env("HTTP_ADDR", ":8080")
-	jwtSecret := env("JWT_SECRET", "change-me-in-production")
-	dependencyTimeout := envDuration("API_DEPENDENCY_RETRY_TIMEOUT_MS", 2*time.Minute)
-	dependencyInterval := envDuration("API_DEPENDENCY_RETRY_INTERVAL_MS", 2*time.Second)
-	redisAddr := env("REDIS_ADDR", "")
+	config := parseAPIConfig(os.Getenv)
 	var store api.Store
-	if env("API_STORE", "memory") == "postgres" {
-		ctx, cancel := context.WithTimeout(context.Background(), dependencyTimeout)
+	if config.StoreMode == "postgres" {
+		ctx, cancel := context.WithTimeout(context.Background(), config.DependencyTimeout)
 		var postgresStore *api.PostgresStore
-		err := startup.RetryDependency(ctx, "postgres store", dependencyInterval, log.Printf, func(ctx context.Context) error {
+		err := startup.RetryDependency(ctx, "postgres store", config.DependencyInterval, log.Printf, func(ctx context.Context) error {
 			var err error
-			postgresStore, err = api.NewPostgresStoreContext(ctx, env("DATABASE_URL", ""), env("DEMO_SEED_DATA", "true") != "false")
+			postgresStore, err = api.NewPostgresStoreContext(ctx, config.DatabaseURL, config.DemoSeedData)
 			return err
 		})
 		cancel()
@@ -36,33 +32,32 @@ func main() {
 		store = postgresStore
 	} else {
 		memoryStore := api.NewMemoryStore()
-		if env("DEMO_SEED_DATA", "true") != "false" {
+		if config.DemoSeedData {
 			memoryStore = api.NewDemoMemoryStore()
 		}
 		store = memoryStore
 	}
 	publisher := api.ScheduleJobPublisher(api.NoopScheduleJobPublisher{})
-	if env("KAFKA_PUBLISH_ENABLED", "true") != "false" {
-		brokers := startup.SplitCSV(env("KAFKA_BROKERS", "kafka:9092"))
-		ctx, cancel := context.WithTimeout(context.Background(), dependencyTimeout)
-		if err := startup.RetryDependency(ctx, "kafka broker", dependencyInterval, log.Printf, func(ctx context.Context) error {
-			return startup.PingAnyTCP(ctx, brokers)
+	if config.KafkaPublishEnabled {
+		ctx, cancel := context.WithTimeout(context.Background(), config.DependencyTimeout)
+		if err := startup.RetryDependency(ctx, "kafka broker", config.DependencyInterval, log.Printf, func(ctx context.Context) error {
+			return startup.PingAnyTCP(ctx, config.KafkaBrokers)
 		}); err != nil {
 			cancel()
 			log.Fatalf("kafka broker failed: %v", err)
 		}
 		cancel()
-		publisher = api.NewKafkaScheduleJobPublisher(brokers, env("KAFKA_SCHEDULE_TOPIC", "woms.schedule.jobs"))
+		publisher = api.NewKafkaScheduleJobPublisher(config.KafkaBrokers, config.KafkaScheduleTopic)
 		defer publisher.Close()
 	}
 	tokenSessions := api.TokenSessionStore(api.NoopTokenSessionStore{})
-	if env("AUTH_SESSION_STORE", "") == "redis" {
-		if redisAddr == "" {
+	if config.AuthSessionStore == "redis" {
+		if config.RedisAddr == "" {
 			log.Fatal("AUTH_SESSION_STORE=redis requires REDIS_ADDR")
 		}
-		redisSessions := api.NewRedisTokenSessionStore(redisAddr)
-		ctx, cancel := context.WithTimeout(context.Background(), dependencyTimeout)
-		if err := startup.RetryDependency(ctx, "redis auth session store", dependencyInterval, log.Printf, func(ctx context.Context) error {
+		redisSessions := api.NewRedisTokenSessionStore(config.RedisAddr)
+		ctx, cancel := context.WithTimeout(context.Background(), config.DependencyTimeout)
+		if err := startup.RetryDependency(ctx, "redis auth session store", config.DependencyInterval, log.Printf, func(ctx context.Context) error {
 			return redisSessions.Ping(ctx)
 		}); err != nil {
 			cancel()
@@ -74,23 +69,63 @@ func main() {
 	}
 
 	server := &http.Server{
-		Addr: addr,
-		Handler: api.NewServerWithPublisherAndConfig(jwtSecret, store, publisher, api.ServerConfig{
+		Addr: config.HTTPAddr,
+		Handler: api.NewServerWithPublisherAndConfig(config.JWTSecret, store, publisher, api.ServerConfig{
 			TokenSessions:     tokenSessions,
-			CORSAllowedOrigin: env("CORS_ALLOWED_ORIGIN", "*"),
-			AuthMode:          env("AUTH_MODE", "local"),
+			CORSAllowedOrigin: config.CORSAllowedOrigin,
+			AuthMode:          config.AuthMode,
 		}),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	log.Printf("woms api listening on %s", addr)
+	log.Printf("woms api listening on %s", config.HTTPAddr)
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("api server failed: %v", err)
 	}
 }
 
+type apiConfig struct {
+	HTTPAddr            string
+	JWTSecret           string
+	StoreMode           string
+	DatabaseURL         string
+	DemoSeedData        bool
+	KafkaPublishEnabled bool
+	KafkaBrokers        []string
+	KafkaScheduleTopic  string
+	AuthSessionStore    string
+	RedisAddr           string
+	CORSAllowedOrigin   string
+	AuthMode            string
+	DependencyTimeout   time.Duration
+	DependencyInterval  time.Duration
+}
+
+func parseAPIConfig(lookup func(string) string) apiConfig {
+	return apiConfig{
+		HTTPAddr:            envLookup(lookup, "HTTP_ADDR", ":8080"),
+		JWTSecret:           envLookup(lookup, "JWT_SECRET", "change-me-in-production"),
+		StoreMode:           envLookup(lookup, "API_STORE", "memory"),
+		DatabaseURL:         envLookup(lookup, "DATABASE_URL", ""),
+		DemoSeedData:        envLookup(lookup, "DEMO_SEED_DATA", "true") != "false",
+		KafkaPublishEnabled: envLookup(lookup, "KAFKA_PUBLISH_ENABLED", "true") != "false",
+		KafkaBrokers:        startup.SplitCSV(envLookup(lookup, "KAFKA_BROKERS", "kafka:9092")),
+		KafkaScheduleTopic:  envLookup(lookup, "KAFKA_SCHEDULE_TOPIC", "woms.schedule.jobs"),
+		AuthSessionStore:    envLookup(lookup, "AUTH_SESSION_STORE", ""),
+		RedisAddr:           envLookup(lookup, "REDIS_ADDR", ""),
+		CORSAllowedOrigin:   envLookup(lookup, "CORS_ALLOWED_ORIGIN", "*"),
+		AuthMode:            envLookup(lookup, "AUTH_MODE", "local"),
+		DependencyTimeout:   envDurationLookup(lookup, "API_DEPENDENCY_RETRY_TIMEOUT_MS", 2*time.Minute),
+		DependencyInterval:  envDurationLookup(lookup, "API_DEPENDENCY_RETRY_INTERVAL_MS", 2*time.Second),
+	}
+}
+
 func env(key, fallback string) string {
-	value := strings.TrimSpace(os.Getenv(key))
+	return envLookup(os.Getenv, key, fallback)
+}
+
+func envLookup(lookup func(string) string, key, fallback string) string {
+	value := strings.TrimSpace(lookup(key))
 	if value == "" {
 		return fallback
 	}
@@ -98,7 +133,11 @@ func env(key, fallback string) string {
 }
 
 func envDuration(key string, fallback time.Duration) time.Duration {
-	value := strings.TrimSpace(os.Getenv(key))
+	return envDurationLookup(os.Getenv, key, fallback)
+}
+
+func envDurationLookup(lookup func(string) string, key string, fallback time.Duration) time.Duration {
+	value := strings.TrimSpace(lookup(key))
 	if value == "" {
 		return fallback
 	}
