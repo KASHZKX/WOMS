@@ -21,47 +21,27 @@ import (
 )
 
 func main() {
-	brokers := env("KAFKA_BROKERS", "kafka:9092")
-	brokerList := startup.SplitCSV(brokers)
-	topic := env("KAFKA_SCHEDULE_TOPIC", "woms.schedule.jobs")
-	group := env("KAFKA_CONSUMER_GROUP", "woms-scheduler-workers")
-	databaseURL := env("DATABASE_URL", "")
-	redisAddr := env("REDIS_ADDR", "")
-	minJobDuration := envDuration("WORKER_MIN_JOB_DURATION_MS", 0)
-	maxRetries := envInt("WORKER_MAX_RETRIES", 3)
-	lockTTL := envDuration("WORKER_LOCK_TTL_MS", 15*time.Second)
-	lockRenewInterval := envDuration("WORKER_LOCK_RENEW_INTERVAL_MS", 5*time.Second)
-	lockTimeout := envDuration("WORKER_LOCK_TIMEOUT_MS", 10*time.Second)
-	backfillInterval := envDuration("WORKER_BACKFILL_INTERVAL_MS", 5*time.Second)
-	dependencyTimeout := envDuration("WORKER_DEPENDENCY_RETRY_TIMEOUT_MS", 2*time.Minute)
-	dependencyInterval := envDuration("WORKER_DEPENDENCY_RETRY_INTERVAL_MS", 2*time.Second)
-	startOffsetLabel := strings.ToLower(strings.TrimSpace(env("WORKER_START_OFFSET", "latest")))
-	startOffset := kafka.LastOffset
-	switch startOffsetLabel {
-	case "earliest", "first", "oldest":
-		startOffset = kafka.FirstOffset
-	case "latest", "last", "newest", "":
-		startOffset = kafka.LastOffset
-	default:
-		log.Printf("invalid WORKER_START_OFFSET=%q, defaulting to latest", startOffsetLabel)
-		startOffset = kafka.LastOffset
+	config, err := loadWorkerConfig(os.LookupEnv)
+	if err != nil {
+		log.Fatalf("invalid scheduler worker configuration: %v", err)
 	}
+	brokerList := startup.SplitCSV(config.brokers)
 	var db *sql.DB
 	var lockProvider womslock.Provider
-	if databaseURL != "" {
-		if err := validateLockConfig(lockTTL, lockRenewInterval, lockTimeout); err != nil {
+	if config.databaseURL != "" {
+		if err := validateLockConfig(config.lockTTL, config.lockRenewInterval, config.lockTimeout); err != nil {
 			log.Fatalf("invalid Redis lock configuration: %v", err)
 		}
-		if backfillInterval <= 0 {
+		if config.backfillInterval <= 0 {
 			log.Fatal("WORKER_BACKFILL_INTERVAL_MS must be greater than zero when DATABASE_URL is set")
 		}
-		if redisAddr == "" {
+		if config.redisAddr == "" {
 			log.Fatal("REDIS_ADDR is required when DATABASE_URL is set; scheduler-worker refuses to run without Redis line locks")
 		}
 		var err error
-		redisLocks := womslock.NewRedisProvider(redisAddr)
-		ctx, cancel := context.WithTimeout(context.Background(), dependencyTimeout)
-		err = startup.RetryDependency(ctx, "redis line lock", dependencyInterval, log.Printf, func(ctx context.Context) error {
+		redisLocks := womslock.NewRedisProvider(config.redisAddr)
+		ctx, cancel := context.WithTimeout(context.Background(), config.dependencyTimeout)
+		err = startup.RetryDependency(ctx, "redis line lock", config.dependencyInterval, log.Printf, func(ctx context.Context) error {
 			return redisLocks.Ping(ctx)
 		})
 		cancel()
@@ -69,12 +49,12 @@ func main() {
 			log.Fatalf("redis line lock failed: %v", err)
 		}
 		lockProvider = redisLocks
-		db, err = sql.Open("postgres", databaseURL)
+		db, err = sql.Open("postgres", config.databaseURL)
 		if err != nil {
 			log.Fatalf("postgres open failed: %v", err)
 		}
-		ctx, cancel = context.WithTimeout(context.Background(), dependencyTimeout)
-		err = startup.RetryDependency(ctx, "postgres", dependencyInterval, log.Printf, func(ctx context.Context) error {
+		ctx, cancel = context.WithTimeout(context.Background(), config.dependencyTimeout)
+		err = startup.RetryDependency(ctx, "postgres", config.dependencyInterval, log.Printf, func(ctx context.Context) error {
 			return db.PingContext(ctx)
 		})
 		cancel()
@@ -82,14 +62,14 @@ func main() {
 			log.Fatalf("postgres ping failed: %v", err)
 		}
 		defer db.Close()
-		if err := backfillQueuedJobs(context.Background(), db, lockProvider, maxRetries, lockTTL, lockRenewInterval, lockTimeout); err != nil {
+		if err := backfillQueuedJobs(context.Background(), db, lockProvider, config.maxRetries, config.lockTTL, config.lockRenewInterval, config.lockTimeout); err != nil {
 			log.Printf("scheduler backfill failed: %v", err)
 		}
 	}
 
-	log.Printf("scheduler worker starting brokers=%s topic=%s group=%s minJobDuration=%s", brokers, topic, group, minJobDuration)
-	ctx, cancel := context.WithTimeout(context.Background(), dependencyTimeout)
-	if err := startup.RetryDependency(ctx, "kafka broker", dependencyInterval, log.Printf, func(ctx context.Context) error {
+	log.Printf("scheduler worker starting brokers=%s topic=%s group=%s minJobDuration=%s", config.brokers, config.topic, config.group, config.minJobDuration)
+	ctx, cancel := context.WithTimeout(context.Background(), config.dependencyTimeout)
+	if err := startup.RetryDependency(ctx, "kafka broker", config.dependencyInterval, log.Printf, func(ctx context.Context) error {
 		return startup.PingAnyTCP(ctx, brokerList)
 	}); err != nil {
 		cancel()
@@ -98,20 +78,20 @@ func main() {
 	cancel()
 	reader := kafka.NewReader(kafka.ReaderConfig{
 		Brokers: brokerList,
-		Topic:   topic,
-		GroupID: group,
+		Topic:   config.topic,
+		GroupID: config.group,
 		// Ensure the consumer picks up topics/partitions created after startup.
 		WatchPartitionChanges:  true,
 		PartitionWatchInterval: 5 * time.Second,
-		StartOffset:            startOffset,
+		StartOffset:            config.startOffset,
 	})
 	defer reader.Close()
-	if db != nil && backfillInterval > 0 {
+	if db != nil && config.backfillInterval > 0 {
 		go func() {
-			ticker := time.NewTicker(backfillInterval)
+			ticker := time.NewTicker(config.backfillInterval)
 			defer ticker.Stop()
 			for range ticker.C {
-				if err := backfillQueuedJobs(context.Background(), db, lockProvider, maxRetries, lockTTL, lockRenewInterval, lockTimeout); err != nil {
+				if err := backfillQueuedJobs(context.Background(), db, lockProvider, config.maxRetries, config.lockTTL, config.lockRenewInterval, config.lockTimeout); err != nil {
 					log.Printf("scheduler backfill failed: %v", err)
 				}
 			}
@@ -127,11 +107,11 @@ func main() {
 		}
 		started := time.Now()
 		log.Printf("scheduler job received topic=%s partition=%d offset=%d key=%s bytes=%d", message.Topic, message.Partition, message.Offset, string(message.Key), len(message.Value))
-		if minJobDuration > 0 {
-			time.Sleep(minJobDuration)
+		if config.minJobDuration > 0 {
+			time.Sleep(config.minJobDuration)
 		}
 		if db != nil {
-			if err := processDBJob(context.Background(), db, lockProvider, message.Value, maxRetries, lockTTL, lockRenewInterval, lockTimeout); err != nil {
+			if err := processDBJob(context.Background(), db, lockProvider, message.Value, config.maxRetries, config.lockTTL, config.lockRenewInterval, config.lockTimeout); err != nil {
 				log.Printf("scheduler job db execution failed key=%s error=%v", string(message.Key), err)
 				time.Sleep(2 * time.Second)
 				continue
@@ -145,7 +125,90 @@ func main() {
 	}
 }
 
+type workerConfig struct {
+	brokers            string
+	topic              string
+	group              string
+	databaseURL        string
+	redisAddr          string
+	minJobDuration     time.Duration
+	maxRetries         int
+	lockTTL            time.Duration
+	lockRenewInterval  time.Duration
+	lockTimeout        time.Duration
+	backfillInterval   time.Duration
+	dependencyTimeout  time.Duration
+	dependencyInterval time.Duration
+	startOffset        int64
+}
+
+func loadWorkerConfig(lookup func(string) (string, bool)) (workerConfig, error) {
+	var config workerConfig
+	var err error
+
+	config.brokers = configString(lookup, "KAFKA_BROKERS", "kafka:9092")
+	config.topic = configString(lookup, "KAFKA_SCHEDULE_TOPIC", "woms.schedule.jobs")
+	config.group = configString(lookup, "KAFKA_CONSUMER_GROUP", "woms-scheduler-workers")
+	config.databaseURL = configString(lookup, "DATABASE_URL", "")
+	config.redisAddr = configString(lookup, "REDIS_ADDR", "")
+	if config.minJobDuration, err = configDuration(lookup, "WORKER_MIN_JOB_DURATION_MS", 0); err != nil {
+		return workerConfig{}, err
+	}
+	if config.maxRetries, err = configInt(lookup, "WORKER_MAX_RETRIES", 3); err != nil {
+		return workerConfig{}, err
+	}
+	if config.lockTTL, err = configDuration(lookup, "WORKER_LOCK_TTL_MS", 15*time.Second); err != nil {
+		return workerConfig{}, err
+	}
+	if config.lockRenewInterval, err = configDuration(lookup, "WORKER_LOCK_RENEW_INTERVAL_MS", 5*time.Second); err != nil {
+		return workerConfig{}, err
+	}
+	if config.lockTimeout, err = configDuration(lookup, "WORKER_LOCK_TIMEOUT_MS", 10*time.Second); err != nil {
+		return workerConfig{}, err
+	}
+	if config.backfillInterval, err = configDuration(lookup, "WORKER_BACKFILL_INTERVAL_MS", 5*time.Second); err != nil {
+		return workerConfig{}, err
+	}
+	if config.dependencyTimeout, err = configDuration(lookup, "WORKER_DEPENDENCY_RETRY_TIMEOUT_MS", 2*time.Minute); err != nil {
+		return workerConfig{}, err
+	}
+	if config.dependencyInterval, err = configDuration(lookup, "WORKER_DEPENDENCY_RETRY_INTERVAL_MS", 2*time.Second); err != nil {
+		return workerConfig{}, err
+	}
+	config.startOffset, err = configStartOffset(configString(lookup, "WORKER_START_OFFSET", "latest"))
+	if err != nil {
+		return workerConfig{}, err
+	}
+	return config, nil
+}
+
 func processDBJob(ctx context.Context, db *sql.DB, lockProvider womslock.Provider, payload []byte, maxRetries int, lockTTL, lockRenewInterval, lockTimeout time.Duration) error {
+	return processJobPayload(ctx, sqlScheduleJobExecutor{db: db}, lockProvider, payload, maxRetries, lockTTL, lockRenewInterval, lockTimeout)
+}
+
+type scheduleJobExecutor interface {
+	markJobFailed(ctx context.Context, jobID, message string) error
+	markJobRetry(ctx context.Context, jobID, message string) error
+	processJobLocked(ctx context.Context, job domain.ScheduleJob, maxRetries int) error
+}
+
+type sqlScheduleJobExecutor struct {
+	db *sql.DB
+}
+
+func (e sqlScheduleJobExecutor) markJobFailed(ctx context.Context, jobID, message string) error {
+	return markJobFailed(ctx, e.db, jobID, message)
+}
+
+func (e sqlScheduleJobExecutor) markJobRetry(ctx context.Context, jobID, message string) error {
+	return markJobRetry(ctx, e.db, jobID, message)
+}
+
+func (e sqlScheduleJobExecutor) processJobLocked(ctx context.Context, job domain.ScheduleJob, maxRetries int) error {
+	return processDBJobLocked(ctx, e.db, job, maxRetries)
+}
+
+func processJobPayload(ctx context.Context, executor scheduleJobExecutor, lockProvider womslock.Provider, payload []byte, maxRetries int, lockTTL, lockRenewInterval, lockTimeout time.Duration) error {
 	var job domain.ScheduleJob
 	if err := json.Unmarshal(payload, &job); err != nil {
 		return err
@@ -154,7 +217,7 @@ func processDBJob(ctx context.Context, db *sql.DB, lockProvider womslock.Provide
 		return nil
 	}
 	if lockProvider == nil {
-		if err := markJobFailed(ctx, db, job.ID, "Redis 排程鎖未設定。"); err != nil {
+		if err := executor.markJobFailed(ctx, job.ID, "Redis 排程鎖未設定。"); err != nil {
 			return err
 		}
 		return nil
@@ -167,7 +230,7 @@ func processDBJob(ctx context.Context, db *sql.DB, lockProvider womslock.Provide
 		if lockCtx.Err() != nil || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 			message = "同產線排程鎖取得逾時，等待重試。"
 		}
-		if retryErr := markJobRetry(ctx, db, job.ID, message); retryErr != nil {
+		if retryErr := executor.markJobRetry(ctx, job.ID, message); retryErr != nil {
 			return retryErr
 		}
 		return nil
@@ -179,7 +242,7 @@ func processDBJob(ctx context.Context, db *sql.DB, lockProvider womslock.Provide
 	}()
 	runCtx, stopRenewal := startLockRenewal(ctx, lineLock, lockTTL, lockRenewInterval)
 	defer stopRenewal()
-	return processDBJobLocked(runCtx, db, job, maxRetries)
+	return executor.processJobLocked(runCtx, job, maxRetries)
 }
 
 func validateLockConfig(lockTTL, lockRenewInterval, lockTimeout time.Duration) error {
@@ -222,21 +285,42 @@ func processDBJobLocked(ctx context.Context, db *sql.DB, job domain.ScheduleJob,
 	}
 	defer tx.Rollback()
 
-	var status domain.ScheduleJobStatus
-	if err := tx.QueryRowContext(ctx, "SELECT status FROM schedule_jobs WHERE id = $1 FOR UPDATE", job.ID).Scan(&status); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return tx.Commit()
+	runErr, shouldCommit := runLockedJobState(ctx, sqlLockedJobStore{tx: tx}, job, maxRetries)
+	if shouldCommit {
+		if commitErr := tx.Commit(); commitErr != nil {
+			return commitErr
 		}
-		return err
 	}
-	if status == domain.JobCancelled {
-		return tx.Commit()
+	return runErr
+}
+
+type lockedJobStore interface {
+	jobStatus(ctx context.Context, id string) (domain.ScheduleJobStatus, bool, error)
+	markRunning(ctx context.Context, id string) (int, error)
+	persist(ctx context.Context, job domain.ScheduleJob) error
+	markRetryAfterRun(ctx context.Context, id, message string) error
+	markFailedAfterRun(ctx context.Context, id, message, reason string) error
+	markCompleted(ctx context.Context, job domain.ScheduleJob) error
+}
+
+type sqlLockedJobStore struct {
+	tx *sql.Tx
+}
+
+func (s sqlLockedJobStore) jobStatus(ctx context.Context, id string) (domain.ScheduleJobStatus, bool, error) {
+	var status domain.ScheduleJobStatus
+	if err := s.tx.QueryRowContext(ctx, "SELECT status FROM schedule_jobs WHERE id = $1 FOR UPDATE", id).Scan(&status); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", false, nil
+		}
+		return "", false, err
 	}
-	if status != domain.JobQueued {
-		return tx.Commit()
-	}
+	return status, true, nil
+}
+
+func (s sqlLockedJobStore) markRunning(ctx context.Context, id string) (int, error) {
 	var attempt int
-	if err := tx.QueryRowContext(ctx, `
+	err := s.tx.QueryRowContext(ctx, `
 		UPDATE schedule_jobs
 		SET status = 'running',
 		    message = '排程任務執行中。',
@@ -245,52 +329,88 @@ func processDBJobLocked(ctx context.Context, db *sql.DB, job domain.ScheduleJob,
 		    updated_at = NOW()
 		WHERE id = $1
 		RETURNING attempt_count
-	`, job.ID).Scan(&attempt); err != nil {
+	`, id).Scan(&attempt)
+	return attempt, err
+}
+
+func (s sqlLockedJobStore) persist(ctx context.Context, job domain.ScheduleJob) error {
+	if job.Source == "hpa-peak-demo" || job.PreviewID == "" {
+		return persistLineSchedule(ctx, s.tx, job)
+	}
+	return persistPreviewAllocations(ctx, s.tx, job)
+}
+
+func (s sqlLockedJobStore) markRetryAfterRun(ctx context.Context, id, message string) error {
+	_, err := s.tx.ExecContext(ctx, `
+		UPDATE schedule_jobs
+		SET status = 'queued', message = $2, updated_at = NOW()
+		WHERE id = $1
+	`, id, message)
+	return err
+}
+
+func (s sqlLockedJobStore) markFailedAfterRun(ctx context.Context, id, message, reason string) error {
+	_, err := s.tx.ExecContext(ctx, `
+		UPDATE schedule_jobs
+		SET status = 'failed', message = $2, completed_at = NOW(), updated_at = NOW()
+		WHERE id = $1
+	`, id, message)
+	if err != nil {
 		return err
 	}
+	return insertWorkerAuditTx(ctx, s.tx, id, "schedule.job.fail", reason)
+}
 
-	var persistErr error
-	if job.Source == "hpa-peak-demo" || job.PreviewID == "" {
-		persistErr = persistLineSchedule(ctx, tx, job)
-	} else {
-		persistErr = persistPreviewAllocations(ctx, tx, job)
-	}
-	if err := persistErr; err != nil {
-		if _, ok := err.(errStaleScheduleData); !ok && attempt < maxRetries {
-			_, _ = tx.ExecContext(ctx, `
-				UPDATE schedule_jobs
-				SET status = 'queued', message = $2, updated_at = NOW()
-				WHERE id = $1
-			`, job.ID, "排程任務暫時失敗，等待重試。")
-			if commitErr := tx.Commit(); commitErr != nil {
-				return commitErr
-			}
-			return err
-		}
-		_, _ = tx.ExecContext(ctx, `
-			UPDATE schedule_jobs
-			SET status = 'failed', message = $2, completed_at = NOW(), updated_at = NOW()
-			WHERE id = $1
-		`, job.ID, "排程任務失敗："+err.Error())
-		_ = insertWorkerAuditTx(ctx, tx, job.ID, "schedule.job.fail", err.Error())
-		return tx.Commit()
-	}
-	if _, err := tx.ExecContext(ctx, `
+func (s sqlLockedJobStore) markCompleted(ctx context.Context, job domain.ScheduleJob) error {
+	if _, err := s.tx.ExecContext(ctx, `
 		UPDATE schedule_jobs
 		SET status = 'completed', message = '排程任務已完成。', completed_at = NOW(), updated_at = NOW()
 		WHERE id = $1
 	`, job.ID); err != nil {
 		return err
 	}
-	if err := insertWorkerAuditTx(ctx, tx, job.ID, "schedule.job.complete", "排程任務已完成。"); err != nil {
+	if err := insertWorkerAuditTx(ctx, s.tx, job.ID, "schedule.job.complete", "排程任務已完成。"); err != nil {
 		return err
 	}
 	if job.PreviewID != "" {
-		if _, err := tx.ExecContext(ctx, "DELETE FROM schedule_previews WHERE id = $1", job.PreviewID); err != nil {
+		if _, err := s.tx.ExecContext(ctx, "DELETE FROM schedule_previews WHERE id = $1", job.PreviewID); err != nil {
 			return err
 		}
 	}
-	return tx.Commit()
+	return nil
+}
+
+func runLockedJobState(ctx context.Context, store lockedJobStore, job domain.ScheduleJob, maxRetries int) (error, bool) {
+	status, found, err := store.jobStatus(ctx, job.ID)
+	if err != nil {
+		return err, false
+	}
+	if !found {
+		return nil, true
+	}
+	if status == domain.JobCancelled {
+		return nil, true
+	}
+	if status != domain.JobQueued {
+		return nil, true
+	}
+
+	attempt, err := store.markRunning(ctx, job.ID)
+	if err != nil {
+		return err, false
+	}
+	if err := store.persist(ctx, job); err != nil {
+		if _, ok := err.(errStaleScheduleData); !ok && attempt < maxRetries {
+			_ = store.markRetryAfterRun(ctx, job.ID, "排程任務暫時失敗，等待重試。")
+			return err, true
+		}
+		_ = store.markFailedAfterRun(ctx, job.ID, "排程任務失敗："+err.Error(), err.Error())
+		return nil, true
+	}
+	if err := store.markCompleted(ctx, job); err != nil {
+		return err, false
+	}
+	return nil, true
 }
 
 func startLockRenewal(ctx context.Context, lineLock womslock.Lock, ttl, interval time.Duration) (context.Context, context.CancelFunc) {
@@ -595,36 +715,59 @@ func (errStaleScheduleData) Error() string {
 	return "排程資料已變更，請重新試排。"
 }
 
-func env(key, fallback string) string {
-	value := strings.TrimSpace(os.Getenv(key))
+func configString(lookup func(string) (string, bool), key, fallback string) string {
+	value, ok := lookup(key)
+	if !ok {
+		return fallback
+	}
+	value = strings.TrimSpace(value)
 	if value == "" {
 		return fallback
 	}
 	return value
 }
 
-func envDuration(key string, fallback time.Duration) time.Duration {
-	value := strings.TrimSpace(os.Getenv(key))
-	if value == "" {
-		return fallback
+func configDuration(lookup func(string) (string, bool), key string, fallback time.Duration) (time.Duration, error) {
+	raw, ok := lookup(key)
+	value := strings.TrimSpace(raw)
+	if !ok || value == "" {
+		return fallback, nil
 	}
 	millis, err := strconv.Atoi(value)
-	if err != nil || millis < 0 {
-		return fallback
+	if err != nil {
+		return 0, errors.New(key + " must be an integer number of milliseconds")
 	}
-	return time.Duration(millis) * time.Millisecond
+	if millis < 0 {
+		return 0, errors.New(key + " must be greater than or equal to zero")
+	}
+	return time.Duration(millis) * time.Millisecond, nil
 }
 
-func envInt(key string, fallback int) int {
-	value := strings.TrimSpace(os.Getenv(key))
-	if value == "" {
-		return fallback
+func configInt(lookup func(string) (string, bool), key string, fallback int) (int, error) {
+	raw, ok := lookup(key)
+	value := strings.TrimSpace(raw)
+	if !ok || value == "" {
+		return fallback, nil
 	}
 	parsed, err := strconv.Atoi(value)
-	if err != nil || parsed < 0 {
-		return fallback
+	if err != nil {
+		return 0, errors.New(key + " must be an integer")
 	}
-	return parsed
+	if parsed < 0 {
+		return 0, errors.New(key + " must be greater than or equal to zero")
+	}
+	return parsed, nil
+}
+
+func configStartOffset(value string) (int64, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "earliest", "first", "oldest":
+		return kafka.FirstOffset, nil
+	case "", "latest", "last", "newest":
+		return kafka.LastOffset, nil
+	default:
+		return 0, errors.New("WORKER_START_OFFSET must be one of earliest, first, oldest, latest, last, newest, or empty")
+	}
 }
 
 func contains(values []string, target string) bool {

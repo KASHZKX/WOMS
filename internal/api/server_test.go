@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -323,6 +324,113 @@ func TestScheduleJobPublishFailureRollsBackQueuedJob(t *testing.T) {
 	}
 }
 
+func TestDemoConflictOrdersHandlerCreatesOrdersWithResponseShapeAndAudit(t *testing.T) {
+	store := NewMemoryStore()
+	server := NewServer("secret", store)
+	schedulerA := login(t, server, "scheduler-a", "demo")
+
+	body := bytes.NewBufferString(`{"count":5,"dueDate":"2026-05-02"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/demo/conflict-orders", body)
+	req.Header.Set("Authorization", "Bearer "+schedulerA)
+	res := httptest.NewRecorder()
+	server.ServeHTTP(res, req)
+
+	if res.Code != http.StatusCreated {
+		t.Fatalf("expected conflict demo creation 201, got %d %s", res.Code, res.Body.String())
+	}
+	var payload struct {
+		Orders []domain.Order `json:"orders"`
+	}
+	if err := json.Unmarshal(res.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode conflict demo response: %v", err)
+	}
+	if len(payload.Orders) != 5 {
+		t.Fatalf("expected five demo orders, got %+v", payload.Orders)
+	}
+	for index, order := range payload.Orders {
+		if order.ID == "" || order.Customer != "Conflict Demo "+strconv.Itoa(index+1) || order.LineID != "A" || order.Status != domain.StatusPending || order.CreatedBy != "user-scheduler-a" {
+			t.Fatalf("unexpected conflict demo order response at %d: %+v", index, order)
+		}
+		if order.Quantity != 2500 || order.Priority != domain.PriorityLow || order.DueDate.Format(dateLayout) != "2026-05-02" {
+			t.Fatalf("unexpected conflict demo order details at %d: %+v", index, order)
+		}
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if len(store.orders) != 5 {
+		t.Fatalf("expected five stored demo orders, got %+v", store.orders)
+	}
+	if len(store.audits) != 5 {
+		t.Fatalf("expected one audit per demo order, got %+v", store.audits)
+	}
+	for _, audit := range store.audits {
+		if audit.ActorID != "user-scheduler-a" || audit.Action != "order.create_demo_conflict" || audit.Reason != "2026-05-02" {
+			t.Fatalf("unexpected conflict demo audit: %+v", audit)
+		}
+	}
+}
+
+func TestDemoConflictOrdersHandlerRejectsUnauthorizedRoleAndInvalidMethod(t *testing.T) {
+	store := NewMemoryStore()
+	server := NewServer("secret", store)
+	sales := login(t, server, "sales", "demo")
+
+	body := bytes.NewBufferString(`{"lineId":"A","count":5,"dueDate":"2026-05-02"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/demo/conflict-orders", body)
+	req.Header.Set("Authorization", "Bearer "+sales)
+	res := httptest.NewRecorder()
+	server.ServeHTTP(res, req)
+	if res.Code != http.StatusForbidden {
+		t.Fatalf("expected sales user forbidden, got %d %s", res.Code, res.Body.String())
+	}
+	if !strings.Contains(res.Body.String(), "只有管理員或排程工程師可以建立衝突展示訂單") {
+		t.Fatalf("expected zh-TW forbidden response, got %s", res.Body.String())
+	}
+
+	admin := login(t, server, "admin", "demo")
+	req = httptest.NewRequest(http.MethodGet, "/api/demo/conflict-orders", nil)
+	req.Header.Set("Authorization", "Bearer "+admin)
+	res = httptest.NewRecorder()
+	server.ServeHTTP(res, req)
+	if res.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected invalid method 405, got %d %s", res.Code, res.Body.String())
+	}
+	if !strings.Contains(res.Body.String(), "不支援此 HTTP 方法") {
+		t.Fatalf("expected zh-TW method response, got %s", res.Body.String())
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if len(store.orders) != 0 || len(store.audits) != 0 {
+		t.Fatalf("rejected demo requests should not create orders or audits, orders=%+v audits=%+v", store.orders, store.audits)
+	}
+}
+
+func TestMemoryStoreCreateDemoConflictOrdersEnforcesSchedulerLine(t *testing.T) {
+	store := NewMemoryStore()
+	orders, err := store.CreateDemoConflictOrders(demoConflictRequest{Count: 5, DueDate: "2026-05-02"}, auth.Claims{
+		Subject: "user-scheduler-a",
+		Role:    domain.RoleScheduler,
+		LineID:  "A",
+	})
+	if err != nil {
+		t.Fatalf("create scheduler default-line conflict orders: %v", err)
+	}
+	if len(orders) != 5 || orders[0].LineID != "A" {
+		t.Fatalf("expected scheduler demo orders on assigned line, got %+v", orders)
+	}
+
+	_, err = store.CreateDemoConflictOrders(demoConflictRequest{LineID: "B", Count: 5, DueDate: "2026-05-02"}, auth.Claims{
+		Subject: "user-scheduler-a",
+		Role:    domain.RoleScheduler,
+		LineID:  "A",
+	})
+	if err == nil || !strings.Contains(err.Error(), "another production line") {
+		t.Fatalf("expected scheduler cross-line rejection, got %v", err)
+	}
+}
+
 func TestHPAPeakDemoIsAdminOnlyAndReportsWebAutoscaling(t *testing.T) {
 	server := NewServer("secret", NewMemoryStore())
 	schedulerA := login(t, server, "scheduler-a", "demo")
@@ -395,6 +503,182 @@ func TestHPAPeakDemoPostDoesNotPublishScheduleJobs(t *testing.T) {
 	}
 	if summary.OrderCount != 0 || summary.LineCount != 0 {
 		t.Fatalf("expected no demo workload orders and lines, got %+v", summary)
+	}
+}
+
+func TestPublishHPAPeakJobsPublishesInOrderAndStopsOnFailure(t *testing.T) {
+	server := NewServerWithPublisher("secret", NewMemoryStore(), &recordingPublisher{})
+	jobs := []domain.ScheduleJob{
+		{ID: "HPA-JOB-L001-001", LineID: "L001", Status: domain.JobQueued},
+		{ID: "HPA-JOB-L002-001", LineID: "L002", Status: domain.JobQueued},
+	}
+	if err := server.publishHPAPeakJobs(context.Background(), jobs); err != nil {
+		t.Fatalf("publish HPA jobs: %v", err)
+	}
+	publisher := server.publisher.(*recordingPublisher)
+	if len(publisher.jobs) != 2 || publisher.jobs[0].ID != jobs[0].ID || publisher.jobs[1].ID != jobs[1].ID {
+		t.Fatalf("unexpected published jobs: %+v", publisher.jobs)
+	}
+
+	failing := NewServerWithPublisher("secret", NewMemoryStore(), failingPublisher{})
+	err := failing.publishHPAPeakJobs(context.Background(), jobs)
+	if err == nil || !strings.Contains(err.Error(), "HPA-JOB-L001-001") {
+		t.Fatalf("expected failing job id in publish error, got %v", err)
+	}
+	if err := failing.publishHPAPeakJobs(context.Background(), nil); err != nil {
+		t.Fatalf("empty HPA publish should be a no-op, got %v", err)
+	}
+}
+
+func TestKubernetesAutoscalingStateAndGetJSONEdges(t *testing.T) {
+	t.Setenv("KUBERNETES_SERVICE_HOST", "")
+	if state := loadHPAAutoscalingState("woms", "hpa", "deploy"); state != nil {
+		t.Fatalf("expected no in-cluster state without Kubernetes env, got %+v", state)
+	}
+
+	server := newAPITestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer token" {
+			t.Fatalf("Authorization = %q", got)
+		}
+		switch r.URL.Path {
+		case "/ok":
+			_, _ = w.Write([]byte(`{"value":7}`))
+		case "/bad-json":
+			_, _ = w.Write([]byte(`{`))
+		default:
+			w.WriteHeader(http.StatusTeapot)
+			_, _ = w.Write([]byte("not ready"))
+		}
+	}))
+	defer server.Close()
+
+	var payload struct {
+		Value int `json:"value"`
+	}
+	if err := kubernetesGetJSON(context.Background(), server.Client(), server.URL, " token ", "/ok", &payload); err != nil {
+		t.Fatalf("kubernetesGetJSON success: %v", err)
+	}
+	if payload.Value != 7 {
+		t.Fatalf("decoded payload = %+v", payload)
+	}
+	if err := kubernetesGetJSON(context.Background(), server.Client(), server.URL, "token", "/missing", &payload); err == nil || !strings.Contains(err.Error(), "418") || !strings.Contains(err.Error(), "not ready") {
+		t.Fatalf("expected HTTP status body error, got %v", err)
+	}
+	if err := kubernetesGetJSON(context.Background(), server.Client(), server.URL, "token", "/bad-json", &payload); err == nil {
+		t.Fatal("expected invalid JSON error")
+	}
+}
+
+func newAPITestServer(t *testing.T, handler http.Handler) *httptest.Server {
+	t.Helper()
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			if strings.Contains(fmt.Sprint(recovered), "operation not permitted") {
+				t.Skipf("httptest server is not permitted in this sandbox: %v", recovered)
+			}
+			panic(recovered)
+		}
+	}()
+	return httptest.NewServer(handler)
+}
+
+func TestUserByUsernameHandlerEdges(t *testing.T) {
+	server := NewServer("secret", NewMemoryStore())
+	scheduler := login(t, server, "scheduler-a", "demo")
+	req := httptest.NewRequest(http.MethodDelete, "/api/users/sales", nil)
+	req.Header.Set("Authorization", "Bearer "+scheduler)
+	res := httptest.NewRecorder()
+	server.ServeHTTP(res, req)
+	if res.Code != http.StatusForbidden {
+		t.Fatalf("expected scheduler forbidden, got %d %s", res.Code, res.Body.String())
+	}
+
+	admin := login(t, server, "admin", "demo")
+	req = httptest.NewRequest(http.MethodGet, "/api/users/sales", nil)
+	req.Header.Set("Authorization", "Bearer "+admin)
+	res = httptest.NewRecorder()
+	server.ServeHTTP(res, req)
+	if res.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected method rejection, got %d %s", res.Code, res.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodDelete, "/api/users/missing", nil)
+	req.Header.Set("Authorization", "Bearer "+admin)
+	res = httptest.NewRecorder()
+	server.ServeHTTP(res, req)
+	if res.Code != http.StatusBadRequest || !strings.Contains(res.Body.String(), "找不到使用者") {
+		t.Fatalf("expected not-found delete response, got %d %s", res.Code, res.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodDelete, "/api/users/", nil)
+	req.Header.Set("Authorization", "Bearer "+admin)
+	res = httptest.NewRecorder()
+	server.ServeHTTP(res, req)
+	if res.Code != http.StatusNotFound {
+		t.Fatalf("expected empty username route rejection, got %d %s", res.Code, res.Body.String())
+	}
+}
+
+func TestScheduleLineResolutionHelpers(t *testing.T) {
+	schedulerClaims := auth.Claims{Role: domain.RoleScheduler, LineID: "B"}
+	salesClaims := auth.Claims{Role: domain.RoleSales}
+	if got := scheduleLineID(scheduleRequest{}, schedulerClaims); got != "B" {
+		t.Fatalf("scheduleLineID default scheduler line = %q", got)
+	}
+	if got := scheduleLineID(scheduleRequest{LineID: "C"}, schedulerClaims); got != "C" {
+		t.Fatalf("scheduleLineID explicit line = %q", got)
+	}
+	if got := scheduleLineID(scheduleRequest{}, salesClaims); got != "" {
+		t.Fatalf("scheduleLineID sales default = %q", got)
+	}
+	if got := scheduleRequestLineID(scheduleRequest{DraftOrder: &createOrderRequest{LineID: "D"}}, salesClaims); got != "D" {
+		t.Fatalf("scheduleRequestLineID draft line = %q", got)
+	}
+	if got := scheduleRequestLineID(scheduleRequest{}, schedulerClaims); got != "B" {
+		t.Fatalf("scheduleRequestLineID scheduler claim line = %q", got)
+	}
+	if hpaDemoLineID(1) != "L001" || hpaDemoLineID(200) != "L200" {
+		t.Fatalf("unexpected HPA demo line ids")
+	}
+	if !isHPADemoLine("L001") || !isHPADemoLine("L200") || isHPADemoLine("L000") || isHPADemoLine("L201") || isHPADemoLine("A") {
+		t.Fatalf("unexpected HPA demo line recognition")
+	}
+}
+
+func TestProductionHelperCompletionAndOrderIDFromTime(t *testing.T) {
+	store := NewMemoryStore()
+	productionDay := mustAPIDate(t, "2026-05-02")
+	store.allocations = []domain.ScheduleAllocation{
+		{OrderID: "ORD-0000001", LineID: "A", Date: productionDay, Quantity: 1000, Status: domain.StatusInProgress},
+		{OrderID: "ORD-0000001", LineID: "A", Date: mustAPIDate(t, "2026-05-03"), Quantity: 500, Status: domain.StatusInProgress},
+		{OrderID: "ORD-0000002", LineID: "A", Date: productionDay, Quantity: 250, Status: domain.StatusCompleted},
+	}
+
+	store.completeProductionAllocationLocked("ORD-0000001", productionDay)
+	if !store.allocations[0].Locked || store.allocations[0].Status != domain.StatusCompleted {
+		t.Fatalf("expected selected allocation completed and locked, got %+v", store.allocations[0])
+	}
+	if store.allocations[1].Status != domain.StatusInProgress {
+		t.Fatalf("other allocation should remain open, got %+v", store.allocations[1])
+	}
+	allocation, ok := store.productionAllocationLocked("ORD-0000002", productionDay)
+	if !ok || allocation.Status != domain.StatusCompleted {
+		t.Fatalf("expected completed allocation fallback, got %+v ok=%t", allocation, ok)
+	}
+
+	store.replaceOrderAllocationsWithCompletedLocked("ORD-0000001", productionDay)
+	if len(store.allocations) != 2 {
+		t.Fatalf("expected other order plus completed selected allocation, got %+v", store.allocations)
+	}
+	for _, allocation := range store.allocations {
+		if allocation.OrderID == "ORD-0000001" && (allocation.Status != domain.StatusCompleted || !allocation.Locked || !truncateDate(allocation.Date).Equal(productionDay)) {
+			t.Fatalf("unexpected replaced allocation: %+v", allocation)
+		}
+	}
+
+	got := orderIDFromTime(time.Unix(0, 1234567890).UTC())
+	if got != "ORD-4567890" {
+		t.Fatalf("orderIDFromTime = %q", got)
 	}
 }
 
