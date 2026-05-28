@@ -1352,13 +1352,15 @@ function renderPreviewCalendar(allocations) {
   const conflicts = state.preview?.conflicts ?? [];
   const resolutionOrderIds = state.preview?.request?.resolutionOrderIds ?? [];
   const previewAllocations = conflicts.length > 0 ? [] : allocations;
-  const pendingAllocations = previewAllocations.map((allocation) => ({ ...allocation, preview: true }));
+  const markedPreviewAllocations = markMovedPreviewAllocations(previewAllocations);
+  const movedFromAllocations = buildMovedFromAllocations(markedPreviewAllocations);
+  const pendingAllocations = markedPreviewAllocations.map((allocation) => ({ ...allocation, preview: true }));
   const visibleAllocations = isSalesDraft
     ? previewCalendarAllocationsForMode(mode, pendingAllocations)
-    : previewAllocations;
+    : markedPreviewAllocations;
   const calendarAllocations = isSalesDraft
     ? visibleAllocations
-    : mergePreviewCalendarAllocations(previewAllocations, state.calendarAllocations, resolutionOrderIds);
+    : [...mergePreviewCalendarAllocations(markedPreviewAllocations, state.calendarAllocations, resolutionOrderIds), ...movedFromAllocations];
   const previewMonth = firstPreviewDate(visibleAllocations) ?? firstPreviewDate(previewAllocations) ?? state.calendarDate;
   const year = previewMonth.getUTCFullYear();
   const monthIndex = previewMonth.getUTCMonth();
@@ -1367,18 +1369,95 @@ function renderPreviewCalendar(allocations) {
   grid.innerHTML = "";
   for (const day of monthGrid(year, monthIndex)) {
     const dayAllocations = groups[day.key] ?? [];
+    const effectiveAllocations = dayAllocations.filter((allocation) => !allocation.movedFromPreview);
     const cell = document.createElement("div");
     cell.className = `calendar-day ${day.inMonth ? "" : "outside"} ${dayAllocations.some((item) => item.preview) ? "preview-highlight" : ""}`;
     cell.innerHTML = `
       <div class="calendar-day-number">
         <span>${day.date.getUTCDate()}</span>
-        <span>${dayAllocations.length ? dayAllocations.length : ""}</span>
+        <span>${effectiveAllocations.length ? effectiveAllocations.length : ""}</span>
       </div>
-      ${renderWaterline(dayAllocations)}
+      ${renderWaterline(effectiveAllocations)}
       ${dayAllocations.map(renderCalendarItem).join("")}
     `;
     grid.appendChild(cell);
   }
+}
+
+function markMovedPreviewAllocations(previewAllocations) {
+  if (previewAllocations.length === 0) {
+    return previewAllocations;
+  }
+  const existingByOrder = new Map();
+  const existingTotals = new Map();
+  for (const allocation of state.calendarAllocations) {
+    if (allocation.status !== statuses[1]) {
+      continue;
+    }
+    const dateKey = dateOnly(allocation.date);
+    if (!existingByOrder.has(allocation.orderId)) {
+      existingByOrder.set(allocation.orderId, new Set());
+    }
+    existingByOrder.get(allocation.orderId).add(dateKey);
+    const existingKey = `${allocation.orderId}|${dateKey}`;
+    existingTotals.set(existingKey, (existingTotals.get(existingKey) ?? 0) + Number(allocation.quantity ?? 0));
+  }
+  const previewTotals = new Map();
+  for (const allocation of previewAllocations) {
+    const dateKey = dateOnly(allocation.date);
+    const previewKey = `${allocation.orderId}|${dateKey}`;
+    previewTotals.set(previewKey, (previewTotals.get(previewKey) ?? 0) + Number(allocation.quantity ?? 0));
+  }
+  return previewAllocations.map((allocation) => {
+    const dates = existingByOrder.get(allocation.orderId);
+    if (!dates) {
+      return allocation;
+    }
+    const dateKey = dateOnly(allocation.date);
+    const moved = !dates.has(dateKey);
+    if (moved) {
+      return { ...allocation, movedPreview: true };
+    }
+    const key = `${allocation.orderId}|${dateKey}`;
+    const existingTotal = existingTotals.get(key);
+    const previewTotal = previewTotals.get(key);
+    if (existingTotal !== undefined && previewTotal !== undefined && existingTotal !== previewTotal) {
+      return { ...allocation, quantityChangedPreview: true };
+    }
+    return allocation;
+  });
+}
+
+function buildMovedFromAllocations(previewAllocations) {
+  if (previewAllocations.length === 0) {
+    return [];
+  }
+  const previewDatesByOrder = new Map();
+  for (const allocation of previewAllocations) {
+    if (!previewDatesByOrder.has(allocation.orderId)) {
+      previewDatesByOrder.set(allocation.orderId, new Set());
+    }
+    previewDatesByOrder.get(allocation.orderId).add(dateOnly(allocation.date));
+  }
+  const movedFrom = [];
+  for (const allocation of state.calendarAllocations) {
+    if (allocation.status !== statuses[1]) {
+      continue;
+    }
+    const previewDates = previewDatesByOrder.get(allocation.orderId);
+    if (!previewDates) {
+      continue;
+    }
+    const dateKey = dateOnly(allocation.date);
+    if (previewDates.has(dateKey)) {
+      continue;
+    }
+    movedFrom.push({
+      ...allocation,
+      movedFromPreview: true,
+    });
+  }
+  return movedFrom;
 }
 
 function previewCalendarAllocationsForMode(mode, pendingAllocations) {
@@ -1528,18 +1607,47 @@ function renderWaterline(allocations) {
 }
 
 function renderCalendarItem(allocation) {
-  const actionable = !allocation.preview && (allocation.status === statuses[1] || allocation.status === statuses[2]) && state.user?.role === "scheduler";
+  const actionable = !allocation.preview
+    && !allocation.movedFromPreview
+    && (allocation.status === statuses[1] || allocation.status === statuses[2])
+    && state.user?.role === "scheduler";
   const tag = actionable ? "button" : "div";
+  const movedClass = allocation.movedPreview ? "moved-preview" : "";
+  const movedFromClass = allocation.movedFromPreview ? "moved-from-preview" : "";
+  const quantityChangedClass = allocation.quantityChangedPreview ? "quantity-changed-preview" : "";
+  const childOrderClass = isNewChildScheduledAllocation(allocation) ? "child-order-preview" : "";
   const attrs = actionable
     ? `type="button" data-calendar-order-id="${escapeHtml(allocation.orderId)}" data-calendar-date="${dateOnly(allocation.date)}"`
     : "";
+  const movedNote = allocation.movedFromPreview ? "<span class=\"calendar-item-note\">已移出</span>" : "";
+  const quantityNote = allocation.quantityChangedPreview ? "<span class=\"calendar-item-note\">數量調整</span>" : "";
+  const childNote = isNewChildScheduledAllocation(allocation) ? "<span class=\"calendar-item-note\">子訂單</span>" : "";
   return `
-    <${tag} class="calendar-item ${priorityClass(allocation.priority)} ${allocation.preview ? "preview-item-inline" : ""}" ${attrs}>
+    <${tag} class="calendar-item ${priorityClass(allocation.priority)} ${allocation.preview ? "preview-item-inline" : ""} ${movedClass} ${movedFromClass} ${quantityChangedClass} ${childOrderClass}" ${attrs}>
       <strong>${escapeHtml(allocation.orderId)}</strong>
       <span>${escapeHtml(allocation.customer ?? "Preview")} · ${calendarDisplayQuantity(allocation).toLocaleString()} 片</span>
       <span>${priorityLabel(allocation.priority)} · ${escapeHtml(allocation.status ?? "試排")}</span>
+      ${movedNote}
+      ${quantityNote}
+      ${childNote}
     </${tag}>
   `;
+}
+
+function isNewChildScheduledAllocation(allocation) {
+  if (!allocation.preview || allocation.status !== statuses[1]) {
+    return false;
+  }
+  const sourceOrderId = allocation.sourceOrderId || allocation.sourceOrderID;
+  if (!sourceOrderId && !isChildOrderId(allocation.orderId)) {
+    return false;
+  }
+  return !state.calendarAllocations.some((item) => item.orderId === allocation.orderId);
+}
+
+function isChildOrderId(orderId) {
+  const match = String(orderId).match(/^(ORD-[^-]+)-(\d+)$/);
+  return Boolean(match && Number.isFinite(Number(match[2])));
 }
 
 function calendarDisplayQuantity(allocation) {

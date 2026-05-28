@@ -954,6 +954,36 @@ button.calendar-item:focus-visible {
   border: 1px dashed #f79009;
 }
 
+.calendar-item.moved-preview {
+  border: 1px solid #2e90fa;
+  box-shadow: 0 0 0 2px rgb(46 144 250 / 20%);
+  background: #eef6ff;
+}
+
+.calendar-item.moved-from-preview {
+  border: 1px dashed #98a2b3;
+  background: #f8fafc;
+  color: #475467;
+}
+
+.calendar-item.quantity-changed-preview {
+  border: 1px solid #12b76a;
+  box-shadow: 0 0 0 2px rgb(18 183 106 / 18%);
+  background: #ecfdf3;
+}
+
+.calendar-item.child-order-preview {
+  border: 1px solid #f79009;
+  box-shadow: 0 0 0 2px rgb(247 144 9 / 18%);
+  background: #fffaeb;
+}
+
+.calendar-item-note {
+  font-size: 11px;
+  font-weight: 800;
+  color: #475467;
+}
+
 .preview-panel {
   display: grid;
   gap: 8px;
