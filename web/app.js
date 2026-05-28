@@ -427,11 +427,6 @@ document.getElementById("preview-page-list").addEventListener("click", async (ev
     return;
   }
   try {
-    if (action === "retry-start-date") {
-      const startDate = document.getElementById("conflict-start-date").value;
-      await retryPreview({ startDate, manualForce: false, reason: "" });
-      return;
-    }
     if (action === "retry-today") {
       await retryPreview({ startDate: tomorrowDateInputValue(), manualForce: false, reason: "" });
       return;
@@ -1435,17 +1430,11 @@ function renderConflictActions(conflicts, manualForce) {
   if (state.preview?.kind !== "schedule" || conflicts.length === 0) {
     return "";
   }
-  const startDate = state.preview.request.startDate || todayDateInputValue();
   return `
     <div class="conflict-actions">
       <h3>衝突修改</h3>
       <p class="conflict-note">可以選取衝突訂單與可移動的既有排程，先預覽最早完成解法；確認接受後才會更新正式日曆。</p>
       ${renderConflictSolutionPicker(conflicts, state.preview?.request?.orderIds ?? [])}
-      <label>
-        <span>調整開始日期</span>
-        <input id="conflict-start-date" type="date" onclick="this.showPicker()" value="${escapeHtml(startDate)}">
-      </label>
-      <button data-preview-action="retry-start-date" type="button">用新開始日期重新試排</button>
       ${renderConflictDueDateEditors(conflicts)}
       <button class="danger-button" data-preview-action="reject-preview-orders" type="button">駁回此次選取</button>
       <button class="secondary-button" data-preview-action="return-workstation" type="button">回工作站調整訂單</button>
