@@ -28,6 +28,13 @@ func requirePostgresIntegration(t *testing.T) string {
 	if databaseURL == "" {
 		t.Skip("DATABASE_URL is required for PostgreSQL integration tests")
 	}
+	parsedURL, err := url.Parse(databaseURL)
+	if err == nil {
+		query := parsedURL.Query()
+		query.Set("sslmode", "disable")
+		parsedURL.RawQuery = query.Encode()
+		databaseURL = parsedURL.String()
+	}
 	chdirRepoRoot(t)
 	return databaseURL
 }
@@ -60,6 +67,12 @@ func chdirRepoRoot(t *testing.T) {
 func newIntegrationPostgresStore(t *testing.T) *PostgresStore {
 	t.Helper()
 	databaseURL := requirePostgresIntegration(t)
+	parsedURL, _ := url.Parse(databaseURL)
+	query := parsedURL.Query()
+	query.Set("sslmode", "disable")
+	parsedURL.RawQuery = query.Encode()
+	databaseURL = parsedURL.String()
+
 	schema := fmt.Sprintf("woms_it_%d", time.Now().UnixNano())
 	adminDB, err := sql.Open("postgres", databaseURL)
 	if err != nil {
