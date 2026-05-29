@@ -332,6 +332,14 @@ test("compareOrderIds avoids sorting elements alphabetically and sorts naturally
   assert.deepEqual([...ids].sort(compareOrderIds), ["ORD-2", "ORD-10", "ORD-A", "ORD-B"]);
 });
 
+test("compareOrderIds handles parent and child remainder order IDs correctly", () => {
+  const ids = ["ORD-0000002-1", "ORD-0000001-2", "ORD-0000001", "ORD-0000001-1"];
+  assert.deepEqual(
+    [...ids].sort(compareOrderIds),
+    ["ORD-0000001", "ORD-0000001-1", "ORD-0000001-2", "ORD-0000002-1"]
+  );
+});
+
 test("compareNatural sorts elements naturally rather than alphabetically", () => {
   const lines = ["Line 10", "Line 2", "Line B", "Line A"];
   assert.deepEqual([...lines].sort(compareNatural), ["Line 2", "Line 10", "Line A", "Line B"]);
