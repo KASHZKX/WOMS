@@ -77,7 +77,7 @@ export function isChildOrderId(orderId) {
 }
 
 export function defaultLine(lines) {
-  return [...lines].map((line) => typeof line === "string" ? line : line.id).sort()[0] ?? "";
+  return [...lines].map((line) => typeof line === "string" ? line : line.id).sort(compareNatural)[0] ?? "";
 }
 
 export function lineScopedOrders(orders, lineId) {
@@ -116,7 +116,7 @@ export function conflictExplanation(conflict) {
 }
 
 export function uniqueValues(items, key) {
-  return Array.from(new Set(items.map((item) => item[key]).filter(Boolean))).sort();
+  return Array.from(new Set(items.map((item) => item[key]).filter(Boolean))).sort(compareNatural);
 }
 
 export function statusCounts(orders) {
@@ -279,6 +279,10 @@ export function compareOrderIds(a, b) {
   const valA = String(a);
   const valB = String(b);
   return naturalOrderNumber(valA) - naturalOrderNumber(valB) || valA.localeCompare(valB);
+}
+
+export function compareNatural(a, b) {
+  return String(a).localeCompare(String(b), undefined, { numeric: true });
 }
 
 function waterlineColor(ratio) {
