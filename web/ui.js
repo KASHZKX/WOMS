@@ -47,7 +47,7 @@ export function trailingAsciiDigits(value) {
   const text = String(value);
   let start = text.length;
   while (start > 0) {
-    const code = text.charCodeAt(start - 1);
+    const code = text.codePointAt(start - 1);
     if (code < 48 || code > 57) {
       break;
     }

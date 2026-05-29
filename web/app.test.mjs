@@ -1020,6 +1020,73 @@ test("scheduler workspace renders orders calendar history and previews selected 
   }
 });
 
+test("queued scheduler jobs poll until completion and refresh workspace", async () => {
+  const document = buildDomFromIndex();
+  const calls = [];
+  let jobReads = 0;
+  const fetchImpl = async (path, options = {}) => {
+    calls.push({ path, options });
+    if (path === "/api/lines") {
+      return jsonResponse({ lines: [{ id: "A", name: "Line A", capacityPerDay: 10000, timezone: "Asia/Taipei" }] });
+    }
+    if (path === "/api/orders") {
+      return jsonResponse({
+        orders: [
+          { id: "ORD-PENDING", customer: "ACME", lineId: "A", quantity: 2500, priority: "high", status: "待排程", dueDate: dateKeyAfter(6), createdBy: "user-sales" },
+        ],
+      });
+    }
+    if (String(path).startsWith("/api/schedules/calendar?")) {
+      return jsonResponse({ allocations: [], pendingAllocations: [] });
+    }
+    if (String(path).startsWith("/api/schedules/history?")) {
+      return jsonResponse({ history: [] });
+    }
+    if (path === "/api/schedules/preview") {
+      return jsonResponse({
+        previewId: "PREVIEW-QUEUED",
+        currentDate: dateKeyAfter(0),
+        allocations: [
+          { orderId: "ORD-PENDING", customer: "ACME", lineId: "A", date: dateKeyAfter(2), quantity: 2500, priority: "high", status: "已排程" },
+        ],
+        conflicts: [],
+      });
+    }
+    if (path === "/api/schedules/jobs") {
+      assert.equal(options.method, "POST");
+      return jsonResponse({ id: "JOB-QUEUED", status: "queued" });
+    }
+    if (path === "/api/schedules/jobs/JOB-QUEUED") {
+      jobReads += 1;
+      return jsonResponse(jobReads === 1
+        ? { id: "JOB-QUEUED", status: "running" }
+        : { id: "JOB-QUEUED", status: "completed" });
+    }
+    throw new Error(`unexpected fetch ${path}`);
+  };
+  const restoreGlobals = installBrowserGlobalsWithFetch(document, fetchImpl, {
+    "woms.token": "token-scheduler",
+    "woms.user": JSON.stringify({ id: "scheduler-a", username: "scheduler", role: "scheduler", lineId: "A" }),
+  });
+  try {
+    await import(appModuleUrl("queued-schedule-job"));
+    await settleApp();
+
+    const pendingCard = document.getElementById("orders-body").children.find((item) => item.dataset.orderId === "ORD-PENDING");
+    await pendingCard.dispatchEvent({ type: "click", target: pendingCard });
+    await document.getElementById("preview-selected").dispatchEvent({ type: "click" });
+    await settleApp();
+    await document.getElementById("confirm-schedule-job").dispatchEvent({ type: "click" });
+    await settleApp();
+
+    assert.equal(jobReads, 2);
+    assert.equal(document.getElementById("message-title").textContent, "排程完成");
+    assert.equal(calls.filter((call) => call.path === "/api/orders").length >= 2, true);
+  } finally {
+    restoreGlobals();
+  }
+});
+
 test("admin user management and autoscaling controls submit expected API calls", async () => {
   const document = buildDomFromIndex();
   const calls = [];
