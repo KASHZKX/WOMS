@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
+  compareOrderIds,
   defaultLine,
   conflictExplanation,
   customerFilterValues,
@@ -323,6 +324,11 @@ test("sortOrdersForWorkstation keeps trailing-number ordering and non-numeric fa
     { id: "ORD-2", dueDate: "2026-04-30", priority: "low" },
   ];
   assert.deepEqual(sortOrdersForWorkstation(orders).map((item) => item.id), ["ORD-2", "ORD-10", "ORD-A", "ORD-B"]);
+});
+
+test("compareOrderIds avoids sorting elements alphabetically and sorts naturally", () => {
+  const ids = ["ORD-10", "ORD-2", "ORD-B", "ORD-A"];
+  assert.deepEqual([...ids].sort(compareOrderIds), ["ORD-2", "ORD-10", "ORD-A", "ORD-B"]);
 });
 
 test("isChildOrderId accepts only ORD parent ids with numeric child suffixes", () => {

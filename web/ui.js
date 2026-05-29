@@ -275,6 +275,12 @@ function naturalOrderNumber(value) {
   return suffix ? Number(suffix) : Number.MAX_SAFE_INTEGER;
 }
 
+export function compareOrderIds(a, b) {
+  const valA = String(a);
+  const valB = String(b);
+  return naturalOrderNumber(valA) - naturalOrderNumber(valB) || valA.localeCompare(valB);
+}
+
 function waterlineColor(ratio) {
   const clamped = Math.max(0, Math.min(ratio, 1));
   if (clamped < 0.8) {

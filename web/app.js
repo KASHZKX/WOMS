@@ -1,4 +1,5 @@
 import {
+  compareOrderIds,
   conflictExplanation,
   customerFilterValues,
   dateKeyInTimeZone,
@@ -1524,10 +1525,10 @@ function renderConflictActions(conflicts, manualForce) {
 
 function renderConflictSolutionPicker(conflicts, selectedOrderIds) {
   const conflictOrderIds = Array.from(new Set(conflicts.map((conflict) => conflict.orderId)));
-  const solutionOrderIds = Array.from(new Set([...(selectedOrderIds ?? []), ...conflictOrderIds])).sort();
+  const solutionOrderIds = Array.from(new Set([...(selectedOrderIds ?? []), ...conflictOrderIds])).sort(compareOrderIds);
   const selectedSet = new Set(selectedOrderIds ?? []);
   const hasSelection = selectedSet.size > 0;
-  const affectedOrderIds = Array.from(new Set(conflicts.flatMap((conflict) => conflict.affectedOrderIds ?? []))).sort();
+  const affectedOrderIds = Array.from(new Set(conflicts.flatMap((conflict) => conflict.affectedOrderIds ?? []))).sort(compareOrderIds);
   const movableAffected = affectedOrderIds.filter(canMoveOrder);
   const blockedAffected = affectedOrderIds.filter((orderId) => !canMoveOrder(orderId));
   return `
@@ -1574,7 +1575,7 @@ function renderSolutionNotice(allocations) {
       </div>
     `;
   }
-  const lateOrderIds = Array.from(new Set(lateAllocations.map((allocation) => allocation.orderId))).sort();
+  const lateOrderIds = Array.from(new Set(lateAllocations.map((allocation) => allocation.orderId))).sort(compareOrderIds);
   return `
     <div class="preview-item solution-notice high">
       <strong>最早完成解法</strong>
