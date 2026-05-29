@@ -276,29 +276,7 @@ function naturalOrderNumber(value) {
 }
 
 export function compareOrderIds(a, b) {
-  const parseOrderId = (orderId) => {
-    const val = String(orderId);
-    if (isChildOrderId(val)) {
-      const childSuffix = trailingAsciiDigits(val);
-      const separatorIndex = val.length - childSuffix.length - 1;
-      const parent = val.slice(0, separatorIndex);
-      return { parent, child: Number(childSuffix) };
-    }
-    return { parent: val, child: -1 };
-  };
-
-  const parsedA = parseOrderId(a);
-  const parsedB = parseOrderId(b);
-
-  const parentDiff =
-    naturalOrderNumber(parsedA.parent) - naturalOrderNumber(parsedB.parent) ||
-    parsedA.parent.localeCompare(parsedB.parent);
-
-  if (parentDiff !== 0) {
-    return parentDiff;
-  }
-
-  return parsedA.child - parsedB.child;
+  return compareNatural(a, b);
 }
 
 export function compareNatural(a, b) {

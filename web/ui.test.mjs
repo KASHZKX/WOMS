@@ -348,6 +348,14 @@ test("compareOrderIds avoids equivalence collision for parents and child suffixe
   );
 });
 
+test("compareOrderIds handles parent and child remainder order IDs with hyphens in parent ID correctly", () => {
+  const ids = ["ORD-PROD-12-1", "ORD-PROD-2", "ORD-PROD-12"];
+  assert.deepEqual(
+    [...ids].sort(compareOrderIds),
+    ["ORD-PROD-2", "ORD-PROD-12", "ORD-PROD-12-1"]
+  );
+});
+
 test("compareNatural sorts elements naturally rather than alphabetically", () => {
   const lines = ["Line 10", "Line 2", "Line B", "Line A"];
   assert.deepEqual([...lines].sort(compareNatural), ["Line 2", "Line 10", "Line A", "Line B"]);
