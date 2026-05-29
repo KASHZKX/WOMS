@@ -340,6 +340,14 @@ test("compareOrderIds handles parent and child remainder order IDs correctly", (
   );
 });
 
+test("compareOrderIds avoids equivalence collision for parents and child suffixes of 0", () => {
+  const ids = ["ORD-0000001-0", "ORD-0000001"];
+  assert.deepEqual(
+    [...ids].sort(compareOrderIds),
+    ["ORD-0000001", "ORD-0000001-0"]
+  );
+});
+
 test("compareNatural sorts elements naturally rather than alphabetically", () => {
   const lines = ["Line 10", "Line 2", "Line B", "Line A"];
   assert.deepEqual([...lines].sort(compareNatural), ["Line 2", "Line 10", "Line A", "Line B"]);

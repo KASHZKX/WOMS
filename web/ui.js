@@ -284,7 +284,7 @@ export function compareOrderIds(a, b) {
       const parent = val.slice(0, separatorIndex);
       return { parent, child: Number(childSuffix) };
     }
-    return { parent: val, child: 0 };
+    return { parent: val, child: -1 };
   };
 
   const parsedA = parseOrderId(a);
