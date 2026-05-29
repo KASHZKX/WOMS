@@ -27,6 +27,26 @@ func TestRetryDependencyEventuallySucceeds(t *testing.T) {
 	}
 }
 
+func TestRetryDependencyLogsReadinessAfterRetry(t *testing.T) {
+	attempts := 0
+	logs := []string{}
+	err := RetryDependency(context.Background(), "postgres", time.Millisecond, func(format string, args ...any) {
+		logs = append(logs, format)
+	}, func(context.Context) error {
+		attempts++
+		if attempts == 1 {
+			return errors.New("not ready")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("RetryDependency returned error: %v", err)
+	}
+	if len(logs) != 2 || !strings.Contains(logs[0], "not ready") || !strings.Contains(logs[1], "ready") {
+		t.Fatalf("unexpected retry logs: %v", logs)
+	}
+}
+
 func TestRetryDependencyStopsWhenContextExpires(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
 	defer cancel()
@@ -36,6 +56,9 @@ func TestRetryDependencyStopsWhenContextExpires(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("RetryDependency returned nil, want timeout error")
+	}
+	if !strings.Contains(err.Error(), "test not ready before timeout") {
+		t.Fatalf("RetryDependency error = %q, want timeout context", err)
 	}
 }
 

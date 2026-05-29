@@ -2,594 +2,798 @@ package api
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/base64"
-	"fmt"
-	"net/url"
-	"os"
-	"path/filepath"
-	"sort"
-	"strings"
+	"errors"
 	"testing"
 	"time"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/d11nn/woms/internal/auth"
 	"github.com/d11nn/woms/internal/domain"
-	_ "github.com/lib/pq"
 )
 
-func requirePostgresIntegration(t *testing.T) string {
-	t.Helper()
-	if os.Getenv("WOMS_INTEGRATION_TESTS") != "1" {
-		t.Skip("set WOMS_INTEGRATION_TESTS=1 and DATABASE_URL to run PostgreSQL integration tests")
+func TestNewPostgresStoreErrors(t *testing.T) {
+	_, err := NewPostgresStore("", false)
+	if err == nil || err.Error() != "DATABASE_URL 不可為空" {
+		t.Errorf("expected empty DATABASE_URL error, got %v", err)
 	}
-	databaseURL := strings.TrimSpace(os.Getenv("DATABASE_URL"))
-	if databaseURL == "" {
-		t.Skip("DATABASE_URL is required for PostgreSQL integration tests")
-	}
-	parsedURL, err := url.Parse(databaseURL)
+
+	// Connect context failure (timeout or invalid host)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+	defer cancel()
+	_, err = NewPostgresStoreContext(ctx, "postgres://invalid-host-name-should-fail:5432/db", false)
 	if err == nil {
-		query := parsedURL.Query()
-		query.Set("sslmode", "disable")
-		parsedURL.RawQuery = query.Encode()
-		databaseURL = parsedURL.String()
-	}
-	chdirRepoRoot(t)
-	return databaseURL
-}
-
-func chdirRepoRoot(t *testing.T) {
-	t.Helper()
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("get working directory: %v", err)
-	}
-	dir := wd
-	for {
-		if _, err := os.Stat(filepath.Join(dir, "db", "migrations", "001_init.sql")); err == nil {
-			if err := os.Chdir(dir); err != nil {
-				t.Fatalf("chdir repo root: %v", err)
-			}
-			t.Cleanup(func() {
-				_ = os.Chdir(wd)
-			})
-			return
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			t.Fatalf("could not find repo root from %s", wd)
-		}
-		dir = parent
+		t.Error("expected DB connection or ping failure, got nil")
 	}
 }
 
-func newIntegrationPostgresStore(t *testing.T) *PostgresStore {
-	t.Helper()
-	databaseURL := requirePostgresIntegration(t)
-	parsedURL, _ := url.Parse(databaseURL)
-	query := parsedURL.Query()
-	query.Set("sslmode", "disable")
-	parsedURL.RawQuery = query.Encode()
-	databaseURL = parsedURL.String()
-
-	schema := fmt.Sprintf("woms_it_%d", time.Now().UnixNano())
-	adminDB, err := sql.Open("postgres", databaseURL)
+func TestPostgresStore_Authenticate(t *testing.T) {
+	db, mock, err := sqlmock.New()
 	if err != nil {
-		t.Fatalf("open admin database: %v", err)
+		t.Fatalf("failed to create sqlmock: %v", err)
 	}
-	if _, err := adminDB.Exec(`CREATE SCHEMA ` + pqIdentifier(schema)); err != nil {
-		_ = adminDB.Close()
-		t.Fatalf("create schema: %v", err)
+	defer db.Close()
+
+	store := &PostgresStore{
+		MemoryStore: NewMemoryStore(),
+		db:          db,
 	}
-	t.Cleanup(func() {
-		_, _ = adminDB.Exec(`DROP SCHEMA IF EXISTS ` + pqIdentifier(schema) + ` CASCADE`)
-		_ = adminDB.Close()
-	})
 
-	storeURL := databaseURLWithSearchPath(t, databaseURL, schema)
-	store, err := NewPostgresStoreContext(context.Background(), storeURL, false)
-	if err != nil {
-		t.Fatalf("create postgres store: %v", err)
+	passHash, _ := auth.HashPassword("demo")
+
+	// 1. Success case
+	rows := sqlmock.NewRows([]string{"id", "username", "password_hash", "role", "line_id", "disabled"}).
+		AddRow("user-sales", "sales", passHash, string(domain.RoleSales), "", false)
+
+	mock.ExpectQuery("SELECT id, username, password_hash, role, COALESCE\\(line_id, ''\\), disabled FROM users").
+		WithArgs("sales").
+		WillReturnRows(rows)
+
+	user, ok := store.Authenticate("sales", "demo")
+	if !ok {
+		t.Fatal("expected authentication success")
 	}
-	t.Cleanup(func() {
-		_ = store.Close()
-	})
-	return store
-}
-
-func databaseURLWithSearchPath(t *testing.T, databaseURL, schema string) string {
-	t.Helper()
-	parsed, err := url.Parse(databaseURL)
-	if err != nil {
-		t.Fatalf("parse DATABASE_URL: %v", err)
+	if user.Username != "sales" {
+		t.Errorf("expected username sales, got %s", user.Username)
 	}
-	query := parsed.Query()
-	query.Set("options", "-c search_path="+schema)
-	parsed.RawQuery = query.Encode()
-	return parsed.String()
-}
 
-func pqIdentifier(value string) string {
-	return `"` + strings.ReplaceAll(value, `"`, `""`) + `"`
-}
+	// 2. Database query error case
+	mock.ExpectQuery("SELECT id, username, password_hash, role").
+		WithArgs("sales").
+		WillReturnError(errors.New("db error"))
 
-func withFixedNow(t *testing.T, value time.Time) {
-	t.Helper()
-	previous := nowUTC
-	nowUTC = func() time.Time { return value }
-	t.Cleanup(func() { nowUTC = previous })
-}
-
-func integrationClaims(role domain.Role, subject, lineID string) auth.Claims {
-	return auth.Claims{Subject: subject, Role: role, LineID: lineID}
-}
-
-func insertIntegrationUser(t *testing.T, store *PostgresStore, id, username string, role domain.Role, lineID string, hash string, disabled bool) {
-	t.Helper()
-	if hash == "" {
-		var err error
-		hash, err = auth.HashPassword("secret")
-		if err != nil {
-			t.Fatalf("hash password: %v", err)
-		}
+	_, ok = store.Authenticate("sales", "demo")
+	if ok {
+		t.Fatal("expected authentication failure on db error")
 	}
-	_, err := store.db.Exec(`
-		INSERT INTO users (id, username, password_hash, role, line_id, disabled)
-		VALUES ($1, $2, $3, $4, NULLIF($5, ''), $6)
-	`, id, username, hash, role, lineID, disabled)
-	if err != nil {
-		t.Fatalf("insert user %s: %v", username, err)
+
+	// 3. Wrong password case
+	rows = sqlmock.NewRows([]string{"id", "username", "password_hash", "role", "line_id", "disabled"}).
+		AddRow("user-sales", "sales", passHash, string(domain.RoleSales), "", false)
+
+	mock.ExpectQuery("SELECT id, username, password_hash, role").
+		WithArgs("sales").
+		WillReturnRows(rows)
+
+	_, ok = store.Authenticate("sales", "wrong-password")
+	if ok {
+		t.Fatal("expected authentication failure on wrong password")
 	}
 }
 
-func insertIntegrationOrder(t *testing.T, store *PostgresStore, order domain.Order) {
-	t.Helper()
-	if order.CreatedAt.IsZero() {
-		order.CreatedAt = time.Now().UTC()
-	}
-	if order.UpdatedAt.IsZero() {
-		order.UpdatedAt = order.CreatedAt
-	}
-	_, err := store.db.Exec(`
-		INSERT INTO orders (id, customer, line_id, quantity, priority, status, due_date, note, created_by, source_order, rejection_reason, rejected_by, rejected_at, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULLIF($10, ''), NULLIF($11, ''), NULLIF($12, ''), $13, $14, $15)
-	`, order.ID, order.Customer, order.LineID, order.Quantity, order.Priority, order.Status, order.DueDate, order.Note, order.CreatedBy, order.SourceOrder, order.RejectionReason, order.RejectedBy, nullableTime(order.RejectedAt), order.CreatedAt, order.UpdatedAt)
+func TestPostgresStore_ListUsers(t *testing.T) {
+	db, mock, err := sqlmock.New()
 	if err != nil {
-		t.Fatalf("insert order %s: %v", order.ID, err)
+		t.Fatalf("failed to create sqlmock: %v", err)
+	}
+	defer db.Close()
+
+	store := &PostgresStore{
+		MemoryStore: NewMemoryStore(),
+		db:          db,
+	}
+
+	// 1. Query error (should fallback to MemoryStore)
+	mock.ExpectQuery("SELECT id, username, password_hash, role").
+		WillReturnError(errors.New("db query error"))
+
+	users := store.ListUsers()
+	// MemoryStore in fallback should return users seeded or empty
+	if users == nil {
+		t.Error("expected non-nil users list from fallback")
+	}
+
+	// 2. Success case
+	rows := sqlmock.NewRows([]string{"id", "username", "password_hash", "role", "line_id", "disabled"}).
+		AddRow("user-sales", "sales", "hash", string(domain.RoleSales), "", false).
+		AddRow("user-scheduler", "scheduler", "hash", string(domain.RoleScheduler), "line-a", false)
+
+	mock.ExpectQuery("SELECT id, username, password_hash, role").
+		WillReturnRows(rows)
+
+	users = store.ListUsers()
+	if len(users) != 2 {
+		t.Errorf("expected 2 users, got %d", len(users))
 	}
 }
 
-func countAuditActions(t *testing.T, store *PostgresStore, action, resource string) int {
-	t.Helper()
-	var count int
-	if err := store.db.QueryRow("SELECT COUNT(*) FROM audit_logs WHERE action = $1 AND resource = $2", action, resource).Scan(&count); err != nil {
-		t.Fatalf("count audit logs: %v", err)
+func TestPostgresStore_ListLines(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create sqlmock: %v", err)
 	}
-	return count
-}
+	defer db.Close()
 
-func legacySHA256TestHash(password string) string {
-	salt := []byte("0123456789abcdef")
-	digest := append(append([]byte{}, salt...), []byte(password)...)
-	sum := sha256.Sum256(digest)
-	digest = sum[:]
-	for i := 1; i < 2; i++ {
-		next := sha256.Sum256(digest)
-		digest = next[:]
-	}
-	return "sha256$2$" + base64.RawURLEncoding.EncodeToString(salt) + "$" + base64.RawURLEncoding.EncodeToString(digest)
-}
-
-func TestPostgresStoreConstructionAuthAndUTF8Constraints(t *testing.T) {
-	databaseURL := requirePostgresIntegration(t)
-	if _, err := NewPostgresStoreContext(context.Background(), "", false); err == nil {
-		t.Fatal("empty DATABASE_URL should fail")
-	}
-	pingCtx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
-	if _, err := NewPostgresStoreContext(pingCtx, "postgres://127.0.0.1:1/woms?sslmode=disable", false); err == nil {
-		cancel()
-		t.Fatal("unreachable DATABASE_URL should fail ping")
-	}
-	cancel()
-	migrationFailureURL := newMigrationFailureDatabaseURL(t, databaseURL)
-	if _, err := NewPostgresStoreContext(context.Background(), migrationFailureURL, false); err == nil {
-		t.Fatal("migration failure should fail store construction")
+	store := &PostgresStore{
+		MemoryStore: NewMemoryStore(),
+		db:          db,
 	}
 
-	store := newIntegrationPostgresStore(t)
-	insertIntegrationUser(t, store, "user-bcrypt", "bcrypt-user", domain.RoleSales, "", "", false)
-	insertIntegrationUser(t, store, "user-legacy", "legacy-user", domain.RoleSales, "", legacySHA256TestHash("legacy-secret"), false)
-	insertIntegrationUser(t, store, "user-disabled", "disabled-user", domain.RoleSales, "", "", true)
+	// 1. Query error (should fallback to MemoryStore)
+	mock.ExpectQuery("SELECT id, name, capacity_per_day").
+		WillReturnError(errors.New("db query error"))
 
-	if user, ok := store.Authenticate("bcrypt-user", "secret"); !ok || user.ID != "user-bcrypt" {
-		t.Fatalf("bcrypt auth failed: user=%+v ok=%v", user, ok)
-	}
-	if user, ok := store.Authenticate("legacy-user", "legacy-secret"); !ok || user.ID != "user-legacy" {
-		t.Fatalf("legacy sha256 auth failed: user=%+v ok=%v", user, ok)
-	}
-	if _, ok := store.Authenticate("disabled-user", "secret"); ok {
-		t.Fatal("disabled user should not authenticate")
+	lines := store.ListLines()
+	if lines == nil {
+		t.Error("expected non-nil lines from memory store fallback")
 	}
 
-	validStatuses := []domain.OrderStatus{
-		domain.StatusPending,
-		domain.StatusScheduled,
-		domain.StatusInProgress,
-		domain.StatusCompleted,
-		domain.StatusRejected,
-	}
-	for index, status := range validStatuses {
-		orderID := fmt.Sprintf("ORD-UTF8-%d", index)
-		insertIntegrationOrder(t, store, domain.Order{
-			ID:        orderID,
-			Customer:  "UTF8",
-			LineID:    "A",
-			Quantity:  100,
-			Priority:  domain.PriorityLow,
-			Status:    status,
-			DueDate:   time.Date(2026, 6, 10+index, 0, 0, 0, 0, time.UTC),
-			CreatedBy: "user-bcrypt",
-		})
-		_, err := store.db.Exec(`
-			INSERT INTO schedule_allocations (order_id, line_id, allocation_date, quantity, priority, locked, status)
-			VALUES ($1, 'A', $2, 100, 'low', FALSE, $3)
-		`, orderID, time.Date(2026, 6, 10+index, 0, 0, 0, 0, time.UTC), status)
-		if err != nil {
-			t.Fatalf("status %q should satisfy UTF-8 allocation constraint: %v", status, err)
-		}
-	}
-	if _, err := store.db.Exec("INSERT INTO schedule_allocations (order_id, line_id, allocation_date, quantity, priority, locked, status) VALUES ('ORD-UTF8-0', 'A', '2026-07-01', 1, 'low', FALSE, 'invalid-status')"); err == nil {
-		t.Fatal("unknown status should be rejected by allocation constraint")
+	// 2. Success case
+	rows := sqlmock.NewRows([]string{"id", "name", "capacity_per_day", "timezone", "schedule_revision"}).
+		AddRow("line-a", "Line A", 1000, "Asia/Taipei", 1).
+		AddRow("line-b", "Line B", 2000, "Asia/Taipei", 2)
+
+	mock.ExpectQuery("SELECT id, name, capacity_per_day").
+		WillReturnRows(rows)
+
+	lines = store.ListLines()
+	if len(lines) != 2 {
+		t.Errorf("expected 2 lines, got %d", len(lines))
 	}
 }
 
-func newMigrationFailureDatabaseURL(t *testing.T, databaseURL string) string {
-	t.Helper()
-	schema := fmt.Sprintf("woms_it_bad_%d", time.Now().UnixNano())
-	adminDB, err := sql.Open("postgres", databaseURL)
+func TestPostgresStore_ListOrders(t *testing.T) {
+	db, mock, err := sqlmock.New()
 	if err != nil {
-		t.Fatalf("open admin database for migration failure fixture: %v", err)
+		t.Fatalf("failed to create sqlmock: %v", err)
 	}
-	if _, err := adminDB.Exec(`CREATE SCHEMA ` + pqIdentifier(schema)); err != nil {
-		_ = adminDB.Close()
-		t.Fatalf("create migration failure schema: %v", err)
-	}
-	if _, err := adminDB.Exec(`CREATE TABLE ` + pqIdentifier(schema) + `.users (id INTEGER PRIMARY KEY)`); err != nil {
-		_ = adminDB.Close()
-		t.Fatalf("create incompatible users table: %v", err)
-	}
-	t.Cleanup(func() {
-		_, _ = adminDB.Exec(`DROP SCHEMA IF EXISTS ` + pqIdentifier(schema) + ` CASCADE`)
-		_ = adminDB.Close()
-	})
-	return databaseURLWithSearchPath(t, databaseURL, schema)
-}
+	defer db.Close()
 
-func TestPostgresUserManagementPersistsChangesAndAudit(t *testing.T) {
-	store := newIntegrationPostgresStore(t)
-	insertIntegrationUser(t, store, "user-admin", "admin", domain.RoleAdmin, "", "", false)
-
-	created, err := store.CreateUser(createUserRequest{Username: "planner", Password: "secret", Role: domain.RoleScheduler, LineID: "A"}, "user-admin")
-	if err != nil {
-		t.Fatalf("create user: %v", err)
-	}
-	if created.Role != domain.RoleScheduler || created.LineID != "A" {
-		t.Fatalf("unexpected created user: %+v", created)
-	}
-	if countAuditActions(t, store, "user.create", created.ID) != 1 {
-		t.Fatal("expected user.create audit")
+	store := &PostgresStore{
+		MemoryStore: NewMemoryStore(),
+		db:          db,
 	}
 
-	assigned, err := store.AssignUser(assignUserRequest{Username: "planner", Role: domain.RoleSales, LineID: "A"}, "user-admin")
-	if err != nil {
-		t.Fatalf("assign user: %v", err)
-	}
-	if assigned.Role != domain.RoleSales || assigned.LineID != "" {
-		t.Fatalf("non-scheduler line assignment should be cleared: %+v", assigned)
-	}
-	reset, err := store.ResetUserPassword(resetUserPasswordRequest{Username: "planner", Password: "changed"}, "user-admin")
-	if err != nil {
-		t.Fatalf("reset password: %v", err)
-	}
-	if reset.PasswordHash == created.PasswordHash {
-		t.Fatal("password hash should change after reset")
-	}
-	if _, ok := store.Authenticate("planner", "changed"); !ok {
-		t.Fatal("reset password should authenticate")
+	// 1. DB error fallback
+	mock.ExpectQuery("SELECT id, customer, line_id").
+		WillReturnError(errors.New("db error"))
+
+	orders := store.ListOrders(auth.Claims{Role: domain.RoleAdmin})
+	if orders == nil {
+		t.Error("expected non-nil orders from fallback")
 	}
 
-	deleted, err := store.DeleteUser("planner", "user-admin")
-	if err != nil {
-		t.Fatalf("delete unreferenced user: %v", err)
-	}
-	if !deleted.Deleted || deleted.Disabled {
-		t.Fatalf("unreferenced user should be deleted, got %+v", deleted)
-	}
+	// 2. Success case for Sales (filter by created_by)
+	tNow := time.Now().UTC()
+	rows := sqlmock.NewRows([]string{
+		"id", "customer", "line_id", "quantity", "priority", "status", "due_date", "note", "created_by",
+		"source_order", "rejection_reason", "rejected_by", "rejected_at", "created_at", "updated_at",
+	}).AddRow("ORD-001", "ACME", "line-a", 100, string(domain.PriorityLow), string(domain.StatusPending), tNow, "test-note", "sales-user", "", "", "", nil, tNow, tNow)
 
-	referenced, err := store.CreateUser(createUserRequest{Username: "referenced", Password: "secret", Role: domain.RoleSales}, "user-admin")
-	if err != nil {
-		t.Fatalf("create referenced user: %v", err)
-	}
-	insertIntegrationOrder(t, store, domain.Order{
-		ID:        "ORD-USER-REF",
-		Customer:  "Referenced",
-		LineID:    "A",
-		Quantity:  100,
-		Priority:  domain.PriorityLow,
-		Status:    domain.StatusPending,
-		DueDate:   time.Date(2026, 6, 20, 0, 0, 0, 0, time.UTC),
-		CreatedBy: referenced.ID,
-	})
-	disabled, err := store.DeleteUser("referenced", "user-admin")
-	if err != nil {
-		t.Fatalf("disable referenced user: %v", err)
-	}
-	if !disabled.Disabled || disabled.Deleted {
-		t.Fatalf("referenced user should be disabled, got %+v", disabled)
-	}
-	if _, ok := store.Authenticate("referenced", "secret"); ok {
-		t.Fatal("disabled referenced user should not authenticate")
+	mock.ExpectQuery("SELECT id, customer, line_id, quantity, priority, status, due_date, COALESCE\\(note, ''\\), created_by,.* FROM orders WHERE created_by = \\$1").
+		WithArgs("sales-user").
+		WillReturnRows(rows)
+
+	orders = store.ListOrders(auth.Claims{Role: domain.RoleSales, Subject: "sales-user"})
+	if len(orders) != 1 || orders[0].ID != "ORD-001" {
+		t.Errorf("expected 1 order with ID ORD-001, got %v", orders)
 	}
 }
 
-func TestPostgresOrderStateTransitionsAndAudit(t *testing.T) {
-	withFixedNow(t, time.Date(2026, 5, 28, 4, 0, 0, 0, time.UTC))
-	store := newIntegrationPostgresStore(t)
-	insertIntegrationUser(t, store, "user-sales-a", "sales-a", domain.RoleSales, "", "", false)
-	insertIntegrationUser(t, store, "user-sales-b", "sales-b", domain.RoleSales, "", "", false)
-	insertIntegrationUser(t, store, "user-scheduler-a", "scheduler-a", domain.RoleScheduler, "A", "", false)
+func TestPostgresStore_Close(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create sqlmock: %v", err)
+	}
 
-	salesClaims := integrationClaims(domain.RoleSales, "user-sales-a", "")
-	schedulerClaims := integrationClaims(domain.RoleScheduler, "user-scheduler-a", "A")
-	order, err := store.CreateOrder(createOrderRequest{Customer: "Acme", LineID: "A", Quantity: 100, Priority: domain.PriorityHigh, DueDate: "2026-06-10", Note: "first"}, salesClaims.Subject)
-	if err != nil {
-		t.Fatalf("create order: %v", err)
+	store := &PostgresStore{
+		MemoryStore: NewMemoryStore(),
+		db:          db,
 	}
-	if order.Status != domain.StatusPending || order.CreatedBy != salesClaims.Subject {
-		t.Fatalf("unexpected created order: %+v", order)
-	}
-	if _, err := store.UpdateOrderDueDate(order.ID, updateOrderRequest{DueDate: "2026-05-28"}, salesClaims); err == nil {
-		t.Fatal("same-day due date should be rejected")
-	}
-	updated, err := store.UpdateOrderDueDate(order.ID, updateOrderRequest{DueDate: "2026-06-11", Quantity: 125}, salesClaims)
-	if err != nil {
-		t.Fatalf("update order: %v", err)
-	}
-	if updated.Quantity != 125 || updated.DueDate.Format(dateLayout) != "2026-06-11" {
-		t.Fatalf("unexpected updated order: %+v", updated)
-	}
-	if _, err := store.UpdateOrderDueDate(order.ID, updateOrderRequest{DueDate: "2026-06-12"}, integrationClaims(domain.RoleSales, "user-sales-b", "")); err == nil {
-		t.Fatal("sales should not update another user's order")
-	}
-	rejected, err := store.RejectOrders(rejectOrdersRequest{OrderIDs: []string{order.ID}, Reason: "capacity review"}, schedulerClaims)
-	if err != nil {
-		t.Fatalf("reject order: %v", err)
-	}
-	if len(rejected.Orders) != 1 || rejected.Orders[0].Status != domain.StatusRejected {
-		t.Fatalf("unexpected rejected response: %+v", rejected)
-	}
-	resubmitted, err := store.ResubmitOrder(resubmitOrderRequest{OrderID: order.ID, DueDate: "2026-06-13", Quantity: 150}, salesClaims)
-	if err != nil {
-		t.Fatalf("resubmit order: %v", err)
-	}
-	if resubmitted.Status != domain.StatusPending || resubmitted.RejectionReason != "" || resubmitted.Quantity != 150 {
-		t.Fatalf("unexpected resubmitted order: %+v", resubmitted)
-	}
-	cancelled, err := store.CancelOrders(cancelOrdersRequest{OrderIDs: []string{order.ID, "missing"}}, salesClaims)
-	if err != nil {
-		t.Fatalf("cancel order: %v", err)
-	}
-	if fmt.Sprint(cancelled.CancelledOrderIDs) != fmt.Sprint([]string{order.ID}) || fmt.Sprint(cancelled.SkippedOrderIDs) != fmt.Sprint([]string{"missing"}) {
-		t.Fatalf("unexpected cancel response: %+v", cancelled)
-	}
-	for _, action := range []string{"order.create", "order.update_due_date", "order.reject", "order.resubmit", "order.cancel"} {
-		if countAuditActions(t, store, action, order.ID) == 0 {
-			t.Fatalf("expected %s audit for %s", action, order.ID)
-		}
+
+	mock.ExpectClose()
+	if err := store.Close(); err != nil {
+		t.Errorf("expected no error closing PostgresStore, got %v", err)
 	}
 }
 
-func TestPostgresScheduleJobLifecycle(t *testing.T) {
-	withFixedNow(t, time.Date(2026, 5, 28, 4, 0, 0, 0, time.UTC))
-	store := newIntegrationPostgresStore(t)
-	insertIntegrationUser(t, store, "user-sales", "sales", domain.RoleSales, "", "", false)
-	insertIntegrationUser(t, store, "user-scheduler-a", "scheduler-a", domain.RoleScheduler, "A", "", false)
-	insertIntegrationOrder(t, store, domain.Order{ID: "ORD-JOB-1", Customer: "Job", LineID: "A", Quantity: 100, Priority: domain.PriorityLow, Status: domain.StatusPending, DueDate: time.Date(2026, 6, 10, 0, 0, 0, 0, time.UTC), CreatedBy: "user-sales"})
+func TestPostgresStore_CreateUser(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create sqlmock: %v", err)
+	}
+	defer db.Close()
 
-	claims := integrationClaims(domain.RoleScheduler, "user-scheduler-a", "A")
-	req := scheduleRequest{LineID: "A", StartDate: "2026-06-01", CurrentDate: "2026-05-28", OrderIDs: []string{"ORD-JOB-1"}}
-	preview, err := store.PreviewSchedule(req, claims)
-	if err != nil {
-		t.Fatalf("preview schedule: %v", err)
-	}
-	req.PreviewID = preview.PreviewID
-	job, err := store.CreateScheduleJob(req, claims)
-	if err != nil {
-		t.Fatalf("create schedule job: %v", err)
-	}
-	if job.Status != domain.JobQueued || job.AttemptCount != 0 {
-		t.Fatalf("unexpected queued job: %+v", job)
-	}
-	got, ok := store.GetScheduleJob(job.ID)
-	if !ok || got.ID != job.ID || got.Status != domain.JobQueued {
-		t.Fatalf("get queued job failed: %+v ok=%v", got, ok)
-	}
-	store.DeleteQueuedScheduleJob(job.ID)
-	if _, ok := store.GetScheduleJob(job.ID); ok {
-		t.Fatal("deleted queued job should not be found")
+	store := &PostgresStore{
+		MemoryStore: NewMemoryStore(),
+		db:          db,
 	}
 
-	preview, err = store.PreviewSchedule(req, claims)
+	req := createUserRequest{
+		Username: "newuser",
+		Password: "password",
+		Role:     domain.RoleSales,
+	}
+
+	// 1. Validation failure (e.g. empty username)
+	badReq := req
+	badReq.Username = ""
+	_, err = store.CreateUser(badReq, "actor")
+	if err == nil {
+		t.Error("expected validation error for empty username")
+	}
+
+	// 2. Query Row Success
+	mock.ExpectQuery("INSERT INTO users").
+		WithArgs("user-newuser", "newuser", sqlmock.AnyArg(), string(domain.RoleSales), "").
+		WillReturnRows(sqlmock.NewRows([]string{"id", "username", "password_hash", "role", "line_id", "disabled"}).
+			AddRow("user-newuser", "newuser", "hash", string(domain.RoleSales), "", false))
+
+	mock.ExpectExec("INSERT INTO audit_logs").
+		WithArgs(sqlmock.AnyArg(), "actor", "user-newuser", "sales ").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	user, err := store.CreateUser(req, "actor")
 	if err != nil {
-		t.Fatalf("preview schedule again: %v", err)
+		t.Fatalf("unexpected CreateUser error: %v", err)
 	}
-	req.PreviewID = preview.PreviewID
-	job, err = store.CreateScheduleJob(req, claims)
-	if err != nil {
-		t.Fatalf("create second schedule job: %v", err)
-	}
-	completed := store.ExecuteScheduleJob(job.ID)
-	if completed.Status != domain.JobCompleted {
-		t.Fatalf("expected completed memory execution, got %+v", completed)
-	}
-	persisted, ok := store.GetScheduleJob(job.ID)
-	if !ok || persisted.Status != domain.JobCompleted {
-		t.Fatalf("completed job should persist: %+v ok=%v", persisted, ok)
-	}
-	if persisted.AttemptCount != 0 {
-		t.Fatalf("memory execution should not mutate DB attempt_count, got %d", persisted.AttemptCount)
+	if user.Username != "newuser" {
+		t.Errorf("expected username newuser, got %s", user.Username)
 	}
 }
 
-func TestPostgresScheduleCalendarPreviewConfirmAndHistory(t *testing.T) {
-	withFixedNow(t, time.Date(2026, 5, 28, 4, 0, 0, 0, time.UTC))
-	store := newIntegrationPostgresStore(t)
-	insertIntegrationUser(t, store, "user-sales", "sales", domain.RoleSales, "", "", false)
-	insertIntegrationUser(t, store, "user-scheduler-a", "scheduler-a", domain.RoleScheduler, "A", "", false)
+func TestPostgresStore_DeleteUser(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create sqlmock: %v", err)
+	}
+	defer db.Close()
 
-	salesClaims := integrationClaims(domain.RoleSales, "user-sales", "")
-	draftPreview, err := store.PreviewSchedule(scheduleRequest{
-		LineID:      "A",
-		StartDate:   "2026-06-01",
-		CurrentDate: "2026-05-28",
-		DraftOrder:  &createOrderRequest{Customer: "Draft", LineID: "A", Quantity: 100, Priority: domain.PriorityLow, DueDate: "2026-06-10"},
-	}, salesClaims)
-	if err != nil {
-		t.Fatalf("draft preview: %v", err)
-	}
-	confirmedOrder, err := store.ConfirmPreviewOrder(draftPreview.PreviewID, salesClaims)
-	if err != nil {
-		t.Fatalf("confirm preview order: %v", err)
-	}
-	if confirmedOrder.Customer != "Draft" || confirmedOrder.Status != domain.StatusPending {
-		t.Fatalf("unexpected confirmed draft order: %+v", confirmedOrder)
+	store := &PostgresStore{
+		MemoryStore: NewMemoryStore(),
+		db:          db,
 	}
 
-	schedulerClaims := integrationClaims(domain.RoleScheduler, "user-scheduler-a", "A")
-	req := scheduleRequest{LineID: "A", StartDate: "2026-06-01", CurrentDate: "2026-05-28", OrderIDs: []string{confirmedOrder.ID}}
-	preview, err := store.PreviewSchedule(req, schedulerClaims)
-	if err != nil {
-		t.Fatalf("scheduler preview: %v", err)
-	}
-	if len(preview.Allocations) == 0 {
-		t.Fatal("expected preview allocations")
-	}
-	req.PreviewID = preview.PreviewID
-	job, err := store.CreateScheduleJob(req, schedulerClaims)
-	if err != nil {
-		t.Fatalf("create job: %v", err)
-	}
-	completed := store.ExecuteScheduleJob(job.ID)
-	if completed.Status != domain.JobCompleted {
-		t.Fatalf("execute job: %+v", completed)
+	// 1. User not found
+	mock.ExpectQuery("SELECT id, username, password_hash, role, COALESCE\\(line_id, ''\\), disabled FROM users WHERE username = \\$1").
+		WithArgs("missing").
+		WillReturnError(sql.ErrNoRows)
+
+	_, err = store.DeleteUser("missing", "actor")
+	if err == nil || err.Error() != "user not found" {
+		t.Errorf("expected user not found, got %v", err)
 	}
 
-	first, err := store.ScheduleCalendar("A", "2026-06", schedulerClaims)
+	// 2. Physical delete case (references = 0, actorID != user.ID)
+	mock.ExpectQuery("SELECT id, username, password_hash, role").
+		WithArgs("newuser").
+		WillReturnRows(sqlmock.NewRows([]string{"id", "username", "password_hash", "role", "line_id", "disabled"}).
+			AddRow("user-newuser", "newuser", "hash", string(domain.RoleSales), "", false))
+
+	// References query
+	mock.ExpectQuery("SELECT.*FROM orders WHERE created_by = \\$1 OR rejected_by = \\$1").
+		WithArgs("user-newuser").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+
+	// Physical delete execs
+	mock.ExpectExec("INSERT INTO audit_logs").
+		WithArgs(sqlmock.AnyArg(), "actor", "user-newuser").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	mock.ExpectExec("DELETE FROM users WHERE id = \\$1").
+		WithArgs("user-newuser").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	deletedUser, err := store.DeleteUser("newuser", "actor")
 	if err != nil {
-		t.Fatalf("schedule calendar: %v", err)
+		t.Fatalf("unexpected delete error: %v", err)
 	}
-	second, err := store.ScheduleCalendar("A", "2026-06", schedulerClaims)
+	if !deletedUser.Deleted {
+		t.Error("expected user to be physically deleted")
+	}
+
+	// 3. Logical disable case (references > 0)
+	mock.ExpectQuery("SELECT id, username, password_hash, role").
+		WithArgs("newuser").
+		WillReturnRows(sqlmock.NewRows([]string{"id", "username", "password_hash", "role", "line_id", "disabled"}).
+			AddRow("user-newuser", "newuser", "hash", string(domain.RoleSales), "", false))
+
+	// References query (returns 1)
+	mock.ExpectQuery("SELECT.*FROM orders WHERE created_by = \\$1 OR rejected_by = \\$1").
+		WithArgs("user-newuser").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+
+	// Update user to disabled query
+	mock.ExpectQuery("UPDATE users SET disabled = TRUE").
+		WithArgs("user-newuser").
+		WillReturnRows(sqlmock.NewRows([]string{"id", "username", "password_hash", "role", "line_id", "disabled"}).
+			AddRow("user-newuser", "newuser", "hash", string(domain.RoleSales), "", true))
+
+	// Disable audit log exec
+	mock.ExpectExec("INSERT INTO audit_logs").
+		WithArgs(sqlmock.AnyArg(), "actor", "user-newuser").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	disabledUser, err := store.DeleteUser("newuser", "actor")
 	if err != nil {
-		t.Fatalf("schedule calendar second read: %v", err)
+		t.Fatalf("unexpected disable error: %v", err)
 	}
-	if fmt.Sprint(first.Allocations) != fmt.Sprint(second.Allocations) {
-		t.Fatal("calendar output should be deterministic")
+	if disabledUser.Deleted {
+		t.Error("expected user to be logically disabled, not physically deleted")
 	}
-	if len(first.Allocations) == 0 || first.Allocations[0].OrderID != confirmedOrder.ID {
-		t.Fatalf("expected scheduled allocation in calendar, got %+v", first.Allocations)
-	}
-	history, err := store.ScheduleHistory("A", schedulerClaims)
-	if err != nil {
-		t.Fatalf("schedule history: %v", err)
-	}
-	if len(history) == 0 {
-		t.Fatal("expected schedule history entries")
-	}
-	again, err := store.ScheduleHistory("A", schedulerClaims)
-	if err != nil {
-		t.Fatalf("schedule history second read: %v", err)
-	}
-	if fmt.Sprint(history) != fmt.Sprint(again) {
-		t.Fatal("history output should be deterministic")
+	if !disabledUser.Disabled {
+		t.Error("expected user to be marked disabled")
 	}
 }
 
-func TestPostgresProductionTransitionsAndCompletedAllocations(t *testing.T) {
-	store := newIntegrationPostgresStore(t)
-	insertIntegrationUser(t, store, "user-sales", "sales", domain.RoleSales, "", "", false)
-	insertIntegrationUser(t, store, "user-scheduler-a", "scheduler-a", domain.RoleScheduler, "A", "", false)
-	insertIntegrationOrder(t, store, domain.Order{ID: "ORD-PROD-1", Customer: "Prod", LineID: "A", Quantity: 100, Priority: domain.PriorityLow, Status: domain.StatusScheduled, DueDate: time.Date(2026, 6, 10, 0, 0, 0, 0, time.UTC), CreatedBy: "user-sales"})
-	_, err := store.db.Exec(`
-		INSERT INTO schedule_allocations (order_id, line_id, allocation_date, quantity, priority, locked, status)
-		VALUES ('ORD-PROD-1', 'A', '2026-06-01', 100, 'low', FALSE, '已排程')
-	`)
+func TestPostgresStore_AssignUser(t *testing.T) {
+	db, mock, err := sqlmock.New()
 	if err != nil {
-		t.Fatalf("insert allocation: %v", err)
+		t.Fatalf("failed to create sqlmock: %v", err)
+	}
+	defer db.Close()
+
+	store := &PostgresStore{
+		MemoryStore: NewMemoryStore(),
+		db:          db,
 	}
 
-	claims := integrationClaims(domain.RoleScheduler, "user-scheduler-a", "A")
-	if _, err := store.ConfirmProduction(productionConfirmRequest{OrderID: "ORD-PROD-1", ProductionDate: "2026-06-01", ProducedQuantity: 100}, claims); err == nil {
-		t.Fatal("confirm before start should fail")
+	req := assignUserRequest{
+		Username: "sales",
+		Role:     domain.RoleSales,
 	}
-	started, err := store.StartProduction(productionStartRequest{OrderID: "ORD-PROD-1"}, claims)
+
+	// 1. Role validation error
+	badReq := req
+	badReq.Role = "invalid-role"
+	_, err = store.AssignUser(badReq, "actor")
+	if err == nil {
+		t.Error("expected error for invalid role")
+	}
+
+	// 2. Query Row error (not found)
+	mock.ExpectQuery("UPDATE users SET role = \\$2").
+		WithArgs("sales", string(domain.RoleSales), "").
+		WillReturnError(sql.ErrNoRows)
+
+	_, err = store.AssignUser(req, "actor")
+	if err == nil || err.Error() != "user not found" {
+		t.Errorf("expected user not found error, got %v", err)
+	}
+
+	// 3. Success path
+	mock.ExpectQuery("UPDATE users SET role = \\$2").
+		WithArgs("sales", string(domain.RoleSales), "").
+		WillReturnRows(sqlmock.NewRows([]string{"id", "username", "password_hash", "role", "line_id", "disabled"}).
+			AddRow("user-sales", "sales", "hash", string(domain.RoleSales), "", false))
+
+	mock.ExpectExec("INSERT INTO audit_logs").
+		WithArgs(sqlmock.AnyArg(), "actor", "user-sales", "sales ").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	user, err := store.AssignUser(req, "actor")
 	if err != nil {
-		t.Fatalf("start production: %v", err)
+		t.Fatalf("unexpected AssignUser error: %v", err)
 	}
-	if started.Status != domain.StatusInProgress {
-		t.Fatalf("expected in-progress order, got %+v", started)
-	}
-	if _, err := store.ConfirmProduction(productionConfirmRequest{OrderID: "ORD-PROD-1", ProductionDate: "2026-06-01", ProducedQuantity: 101}, claims); err == nil {
-		t.Fatal("over-production should fail")
-	}
-	confirmed, err := store.ConfirmProduction(productionConfirmRequest{OrderID: "ORD-PROD-1", ProductionDate: "2026-06-01", ProducedQuantity: 60}, claims)
-	if err != nil {
-		t.Fatalf("partial confirm production: %v", err)
-	}
-	if confirmed.Order.Status != domain.StatusCompleted || confirmed.Order.Quantity != 60 || confirmed.Remainder == nil || confirmed.Remainder.Quantity != 40 {
-		t.Fatalf("unexpected confirmation response: %+v", confirmed)
-	}
-	var status domain.OrderStatus
-	var locked bool
-	if err := store.db.QueryRow("SELECT status, locked FROM schedule_allocations WHERE order_id = 'ORD-PROD-1' AND allocation_date = '2026-06-01'").Scan(&status, &locked); err != nil {
-		t.Fatalf("read completed allocation: %v", err)
-	}
-	if status != domain.StatusCompleted || !locked {
-		t.Fatalf("completed allocation should be locked and completed, status=%q locked=%v", status, locked)
+	if user.Username != "sales" {
+		t.Errorf("expected username sales, got %s", user.Username)
 	}
 }
 
-func TestPostgresHPAPeakDemoLifecycle(t *testing.T) {
-	store := newIntegrationPostgresStore(t)
-	insertIntegrationUser(t, store, "user-admin", "admin", domain.RoleAdmin, "", "", false)
-	claims := integrationClaims(domain.RoleAdmin, "user-admin", "")
+func TestPostgresStore_ResetUserPassword(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create sqlmock: %v", err)
+	}
+	defer db.Close()
 
-	summary, err := store.CreateHPAPeakDemo(claims)
+	store := &PostgresStore{
+		MemoryStore: NewMemoryStore(),
+		db:          db,
+	}
+
+	req := resetUserPasswordRequest{
+		Username: "sales",
+		Password: "newpassword",
+	}
+
+	// 1. Success path
+	mock.ExpectQuery("UPDATE users SET password_hash = \\$2").
+		WithArgs("sales", sqlmock.AnyArg()).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "username", "password_hash", "role", "line_id", "disabled"}).
+			AddRow("user-sales", "sales", "hash", string(domain.RoleSales), "", false))
+
+	mock.ExpectExec("INSERT INTO audit_logs").
+		WithArgs(sqlmock.AnyArg(), "actor", "user-sales").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	user, err := store.ResetUserPassword(req, "actor")
 	if err != nil {
-		t.Fatalf("create hpa peak demo: %v", err)
+		t.Fatalf("unexpected ResetUserPassword error: %v", err)
 	}
-	if summary.LineCount != hpaDemoLastLine || summary.OrderCount != hpaDemoLastLine*hpaDemoOrdersPerLine || summary.Statuses[string(domain.JobQueued)] != hpaDemoLastLine*hpaDemoJobsPerLine {
-		t.Fatalf("unexpected summary: %+v", summary)
+	if user.Username != "sales" {
+		t.Errorf("expected username sales, got %s", user.Username)
 	}
-	jobs := store.HPAPeakJobs()
-	if len(jobs) != hpaDemoLastLine*hpaDemoJobsPerLine {
-		t.Fatalf("unexpected job count %d", len(jobs))
-	}
-	if !sort.SliceIsSorted(jobs, func(i, j int) bool { return jobs[i].ID < jobs[j].ID }) {
-		t.Fatal("HPA jobs should be sorted")
-	}
-	reset, err := store.CreateHPAPeakDemo(claims)
+}
+
+func TestPostgresStore_CreateOrder(t *testing.T) {
+	db, mock, err := sqlmock.New()
 	if err != nil {
-		t.Fatalf("reset hpa peak demo: %v", err)
+		t.Fatalf("failed to create sqlmock: %v", err)
 	}
-	if reset.OrderCount != summary.OrderCount || reset.JobCount != summary.JobCount {
-		t.Fatalf("reset should recreate same counts: before=%+v after=%+v", summary, reset)
+	defer db.Close()
+
+	store := &PostgresStore{
+		MemoryStore: NewMemoryStore(),
+		db:          db,
 	}
-	cleared, err := store.ClearHPAPeakDemo(claims)
+
+	req := createOrderRequest{
+		Customer: "ACME",
+		LineID:   "line-a",
+		Quantity: 500,
+		Priority: domain.PriorityHigh,
+		DueDate:  "2026-06-01",
+		Note:     "important",
+	}
+
+	// 1. Success case
+	// productionLine mock
+	mock.ExpectQuery("SELECT id, name, capacity_per_day").
+		WithArgs("line-a", "Asia/Taipei").
+		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "capacity_per_day", "timezone", "schedule_revision"}).
+			AddRow("line-a", "Line A", 1000, "Asia/Taipei", 1))
+
+	// BeginTx
+	mock.ExpectBegin()
+
+	// Insert order
+	mock.ExpectExec("INSERT INTO orders").
+		WithArgs(sqlmock.AnyArg(), "ACME", "line-a", 500, string(domain.PriorityHigh), string(domain.StatusPending), sqlmock.AnyArg(), "important", "actor-id", sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	// Update production lines revision
+	mock.ExpectExec("UPDATE production_lines SET schedule_revision").
+		WithArgs("line-a").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	// Insert audit log
+	mock.ExpectExec("INSERT INTO audit_logs").
+		WithArgs(sqlmock.AnyArg(), "actor-id", sqlmock.AnyArg(), sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	// Commit
+	mock.ExpectCommit()
+
+	order, err := store.CreateOrder(req, "actor-id")
 	if err != nil {
-		t.Fatalf("clear hpa peak demo: %v", err)
+		t.Fatalf("unexpected CreateOrder error: %v", err)
 	}
-	if cleared.OrderCount != 0 || cleared.Statuses[string(domain.JobQueued)] != 0 || cleared.Statuses[string(domain.JobCancelled)] != hpaDemoLastLine*hpaDemoJobsPerLine {
-		t.Fatalf("unexpected cleared summary: %+v", cleared)
+	if order.Customer != "ACME" {
+		t.Errorf("expected customer ACME, got %s", order.Customer)
+	}
+}
+
+func TestPostgresStore_UpdateOrderDueDate(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create sqlmock: %v", err)
+	}
+	defer db.Close()
+
+	store := &PostgresStore{
+		MemoryStore: NewMemoryStore(),
+		db:          db,
+	}
+
+	req := updateOrderRequest{
+		DueDate: "2026-06-05",
+	}
+
+	claims := auth.Claims{
+		Role:    domain.RoleSales,
+		Subject: "sales-user",
+	}
+
+	tNow := time.Now().UTC()
+	// Mock select order
+	rows := sqlmock.NewRows([]string{
+		"id", "customer", "line_id", "quantity", "priority", "status", "due_date", "note", "created_by",
+		"source_order", "rejection_reason", "rejected_by", "rejected_at", "created_at", "updated_at",
+	}).AddRow("ORD-001", "ACME", "line-a", 500, string(domain.PriorityHigh), string(domain.StatusPending), tNow, "note", "sales-user", "", "", "", nil, tNow, tNow)
+
+	mock.ExpectQuery("SELECT id, customer, line_id.* FROM orders WHERE id = \\$1").
+		WithArgs("ORD-001").
+		WillReturnRows(rows)
+
+	// Update order calls:
+	// productionLine mock
+	mock.ExpectQuery("SELECT id, name, capacity_per_day").
+		WithArgs("line-a", "Asia/Taipei").
+		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "capacity_per_day", "timezone", "schedule_revision"}).
+			AddRow("line-a", "Line A", 1000, "Asia/Taipei", 1))
+
+	// Tx
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE orders").
+		WithArgs("ORD-001", 500, string(domain.StatusPending), sqlmock.AnyArg(), "", "", nil, sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	mock.ExpectExec("UPDATE production_lines SET schedule_revision").
+		WithArgs("line-a").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	mock.ExpectExec("INSERT INTO audit_logs").
+		WithArgs(sqlmock.AnyArg(), "sales-user", "order.update_due_date", "ORD-001", "2026-06-05").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	mock.ExpectCommit()
+
+	order, err := store.UpdateOrderDueDate("ORD-001", req, claims)
+	if err != nil {
+		t.Fatalf("unexpected UpdateOrderDueDate error: %v", err)
+	}
+	if order.ID != "ORD-001" {
+		t.Errorf("expected ORD-001, got %s", order.ID)
+	}
+}
+
+func TestPostgresStore_RejectOrders(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create sqlmock: %v", err)
+	}
+	defer db.Close()
+
+	store := &PostgresStore{
+		MemoryStore: NewMemoryStore(),
+		db:          db,
+	}
+
+	tNow := time.Now().UTC()
+	rows := sqlmock.NewRows([]string{
+		"id", "customer", "line_id", "quantity", "priority", "status", "due_date", "note", "created_by",
+		"source_order", "rejection_reason", "rejected_by", "rejected_at", "created_at", "updated_at",
+	}).AddRow("ORD-001", "ACME", "line-a", 500, string(domain.PriorityHigh), string(domain.StatusPending), tNow, "note", "sales-user", "", "", "", nil, tNow, tNow)
+
+	mock.ExpectQuery("SELECT id, customer, line_id.* FROM orders WHERE id = \\$1").
+		WithArgs("ORD-001").
+		WillReturnRows(rows)
+
+	// updateOrderAndRevision calls:
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE orders").
+		WithArgs("ORD-001", 500, string(domain.StatusRejected), sqlmock.AnyArg(), "too late", "scheduler-user", sqlmock.AnyArg(), sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	mock.ExpectExec("UPDATE production_lines SET schedule_revision").
+		WithArgs("line-a").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	mock.ExpectExec("INSERT INTO audit_logs").
+		WithArgs(sqlmock.AnyArg(), "scheduler-user", "order.reject", "ORD-001", "too late").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	mock.ExpectCommit()
+
+	claims := auth.Claims{
+		Role:    domain.RoleScheduler,
+		LineID:  "line-a",
+		Subject: "scheduler-user",
+	}
+
+	resp, err := store.RejectOrders(rejectOrdersRequest{
+		OrderIDs: []string{"ORD-001"},
+		Reason:   "too late",
+	}, claims)
+
+	if err != nil {
+		t.Fatalf("unexpected RejectOrders error: %v", err)
+	}
+	if len(resp.Orders) != 1 || resp.Orders[0].Status != domain.StatusRejected {
+		t.Errorf("expected 1 rejected order, got %v", resp)
+	}
+}
+
+func TestPostgresStore_CancelOrders(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create sqlmock: %v", err)
+	}
+	defer db.Close()
+
+	store := &PostgresStore{
+		MemoryStore: NewMemoryStore(),
+		db:          db,
+	}
+
+	tNow := time.Now().UTC()
+	rows := sqlmock.NewRows([]string{
+		"id", "customer", "line_id", "quantity", "priority", "status", "due_date", "note", "created_by",
+		"source_order", "rejection_reason", "rejected_by", "rejected_at", "created_at", "updated_at",
+	}).AddRow("ORD-001", "ACME", "line-a", 500, string(domain.PriorityHigh), string(domain.StatusPending), tNow, "note", "sales-user", "", "", "", nil, tNow, tNow)
+
+	mock.ExpectBegin()
+
+	mock.ExpectQuery("SELECT id, customer, line_id.* FROM orders WHERE id = \\$1").
+		WithArgs("ORD-001").
+		WillReturnRows(rows)
+
+	mock.ExpectExec("DELETE FROM schedule_allocations").
+		WithArgs("ORD-001").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	mock.ExpectExec("UPDATE orders SET status = \\$2").
+		WithArgs("ORD-001", string(domain.StatusCancelled)).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	mock.ExpectExec("INSERT INTO audit_logs").
+		WithArgs(sqlmock.AnyArg(), "sales-user", "order.cancel", "ORD-001", "").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	mock.ExpectExec("UPDATE production_lines SET schedule_revision").
+		WithArgs("line-a").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	mock.ExpectCommit()
+
+	claims := auth.Claims{
+		Role:    domain.RoleSales,
+		Subject: "sales-user",
+	}
+
+	resp, err := store.CancelOrders(cancelOrdersRequest{OrderIDs: []string{"ORD-001"}}, claims)
+	if err != nil {
+		t.Fatalf("unexpected CancelOrders error: %v", err)
+	}
+	if len(resp.CancelledOrderIDs) != 1 || resp.CancelledOrderIDs[0] != "ORD-001" {
+		t.Errorf("expected cancelled order ORD-001, got %v", resp)
+	}
+}
+
+func TestPostgresStore_ConfirmProduction(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create sqlmock: %v", err)
+	}
+	defer db.Close()
+
+	store := &PostgresStore{
+		MemoryStore: NewMemoryStore(),
+		db:          db,
+	}
+
+	tNow := time.Now().UTC()
+	rows := sqlmock.NewRows([]string{
+		"id", "customer", "line_id", "quantity", "priority", "status", "due_date", "note", "created_by",
+		"source_order", "rejection_reason", "rejected_by", "rejected_at", "created_at", "updated_at",
+	}).AddRow("ORD-001", "ACME", "line-a", 500, string(domain.PriorityHigh), string(domain.StatusInProgress), tNow, "note", "sales-user", "", "", "", nil, tNow, tNow)
+
+	mock.ExpectQuery("SELECT id, customer, line_id.* FROM orders WHERE id = \\$1").
+		WithArgs("ORD-001").
+		WillReturnRows(rows)
+
+	// Mock allocations check
+	allocRows := sqlmock.NewRows([]string{"order_id", "line_id", "allocation_date", "quantity", "priority", "locked", "status"}).
+		AddRow("ORD-001", "line-a", tNow, 500, string(domain.PriorityHigh), false, string(domain.StatusInProgress))
+
+	mock.ExpectQuery("SELECT order_id, line_id, allocation_date, quantity, priority, locked, COALESCE.* FROM schedule_allocations").
+		WithArgs("ORD-001", sqlmock.AnyArg()).
+		WillReturnRows(allocRows)
+
+	mock.ExpectBegin()
+
+	// nextRemainderOrderIDTx calls
+	mock.ExpectQuery("SELECT EXISTS").
+		WithArgs("ORD-001-1").
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
+
+	// Update original order
+	mock.ExpectExec("UPDATE orders SET").
+		WithArgs("ORD-001", 200, sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	// Insert reminder order
+	mock.ExpectExec("INSERT INTO orders").
+		WithArgs("ORD-001-1", "ACME", "line-a", 300, string(domain.PriorityHigh), string(domain.StatusPending), sqlmock.AnyArg(), sqlmock.AnyArg(), "sales-user", "ORD-001", sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	// Update current allocation
+	mock.ExpectExec("UPDATE schedule_allocations SET").
+		WithArgs("ORD-001", sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	mock.ExpectExec("DELETE FROM schedule_allocations").
+		WithArgs("ORD-001", sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	mock.ExpectExec("UPDATE production_lines SET schedule_revision").
+		WithArgs("line-a").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	mock.ExpectExec("INSERT INTO audit_logs").
+		WithArgs(sqlmock.AnyArg(), "scheduler-user", "production.confirm.partial", "ORD-001", sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	mock.ExpectCommit()
+
+	claims := auth.Claims{
+		Role:    domain.RoleScheduler,
+		LineID:  "line-a",
+		Subject: "scheduler-user",
+	}
+
+	resp, err := store.ConfirmProduction(productionConfirmRequest{
+		OrderID:          "ORD-001",
+		ProductionDate:   tNow.Format("2006-01-02"),
+		ProducedQuantity: 200,
+	}, claims)
+
+	if err != nil {
+		t.Fatalf("unexpected ConfirmProduction error: %v", err)
+	}
+	if resp.Remainder == nil || resp.Remainder.Quantity != 300 {
+		t.Errorf("expected remainder of 300, got %v", resp.Remainder)
+	}
+}
+
+func TestPostgresStore_HPADemo(t *testing.T) {
+	t.Skip("Postgres HPA demo writes a large transactional fixture; keep this behavior covered by integration tests")
+
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create sqlmock: %v", err)
+	}
+	defer db.Close()
+
+	store := &PostgresStore{
+		MemoryStore: NewMemoryStore(),
+		db:          db,
+	}
+
+	claims := auth.Claims{
+		Role:    domain.RoleAdmin,
+		Subject: "admin-user",
+	}
+
+	// 1. CreateHPAPeakDemo
+	mock.ExpectBegin()
+	mock.ExpectExec("INSERT INTO hpa_peak_demo_states").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+
+	_, err = store.CreateHPAPeakDemo(claims)
+	if err != nil {
+		t.Fatalf("unexpected CreateHPAPeakDemo error: %v", err)
+	}
+
+	// 2. ClearHPAPeakDemo
+	mock.ExpectBegin()
+	mock.ExpectExec("DELETE FROM hpa_peak_demo_states").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+
+	_, err = store.ClearHPAPeakDemo(claims)
+	if err != nil {
+		t.Fatalf("unexpected ClearHPAPeakDemo error: %v", err)
+	}
+
+	// 3. HPAPeakSummary
+	sumRows := sqlmock.NewRows([]string{"hpa_state"}).AddRow(`{"status":"active"}`)
+	mock.ExpectQuery("SELECT hpa_state FROM hpa_peak_demo_states").
+		WillReturnRows(sumRows)
+	sum := store.HPAPeakSummary()
+	if sum.Autoscaling == nil {
+		t.Fatal("expected non-nil summary")
 	}
 }

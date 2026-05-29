@@ -262,6 +262,9 @@ func deleteRedisTokenSession(t *testing.T, store *RedisTokenSessionStore, token 
 func startMockRedisTokenSessionServer(t *testing.T, handler func(cmd string, args []string) string) (string, func()) {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
+		if strings.Contains(err.Error(), "operation not permitted") {
+			t.Skipf("tcp listen is not permitted in this sandbox: %v", err)
+		}
 		t.Fatalf("failed to start mock redis: %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())

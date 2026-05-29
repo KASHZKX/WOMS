@@ -365,7 +365,10 @@ function installBrowserGlobalsWithFetch(document, fetchImpl, initialStorage = {}
     document,
     localStorage,
     confirm: () => true,
-    setInterval: () => 1,
+    setInterval: (callback) => {
+      callback();
+      return 1;
+    },
     clearInterval: () => {},
     setTimeout: (callback) => {
       callback();
@@ -1432,6 +1435,7 @@ test("comprehensive event listener integration tests to maximize app.js coverage
   let failHpaPeak = false;
   let failRetryPreview = false;
   let failOrderSubmit = false;
+  let mockConflicts = [];
   
   const fetchImpl = async (path, options = {}) => {
     calls.push({ path, options });
@@ -1471,6 +1475,9 @@ test("comprehensive event listener integration tests to maximize app.js coverage
         ],
       });
     }
+    if (path === "/api/orders/ORD-PENDING" && options.method === "PATCH") {
+      return jsonResponse({ id: "ORD-PENDING", dueDate: dateKeyAfter(10) });
+    }
     if (path === "/api/orders/reject") {
       if (failReject) {
         throw new Error("mocked failure");
@@ -1499,7 +1506,7 @@ test("comprehensive event listener integration tests to maximize app.js coverage
         allocations: [
           { orderId: "ORD-PENDING", customer: "ACME", lineId: "A", date: dateKeyAfter(2), quantity: 2500, priority: "high", status: "已排程" },
         ],
-        conflicts: [],
+        conflicts: mockConflicts,
       });
     }
     if (path === "/api/orders/preview-confirm") {
@@ -1637,6 +1644,16 @@ test("comprehensive event listener integration tests to maximize app.js coverage
     // 6. Click preview-selected
     await document.getElementById("preview-selected").dispatchEvent({ type: "click" });
     await settleApp();
+
+    // Submit schedule-form
+    await document.getElementById("schedule-form").dispatchEvent({ type: "submit" });
+    await settleApp();
+
+    // Submit schedule-form failure
+    failRetryPreview = true;
+    await document.getElementById("schedule-form").dispatchEvent({ type: "submit" });
+    await settleApp();
+    failRetryPreview = false;
 
     // 7. Click confirm-schedule-job
     await document.getElementById("confirm-schedule-job").dispatchEvent({ type: "click" });
@@ -1830,6 +1847,13 @@ test("comprehensive event listener integration tests to maximize app.js coverage
       await actionsTab.dispatchEvent({ type: "click" });
       await settleApp();
     }
+    await document.getElementById("prev-month").dispatchEvent({ type: "click" });
+    await settleApp();
+    await document.getElementById("next-month").dispatchEvent({ type: "click" });
+    await settleApp();
+    await document.getElementById("today-month").dispatchEvent({ type: "click" });
+    await settleApp();
+
     await document.getElementById("scheduler-panel-toggle")?.dispatchEvent({ type: "click" });
     await settleApp();
 
@@ -1853,37 +1877,121 @@ test("comprehensive event listener integration tests to maximize app.js coverage
     }
 
     // 15. Preview page list actions
-    await document.getElementById("preview-page-list").dispatchEvent({
-      type: "click",
-      target: {
-        dataset: {
-          previewAction: "return-workstation",
-        },
-      },
-    });
+    // Populate state.preview first
+    const pendingCard = getPendingCard();
+    if (pendingCard && !pendingCard.classList.contains("selected")) {
+      await pendingCard.dispatchEvent({ type: "click", target: pendingCard });
+      await settleApp();
+    }
+    await document.getElementById("preview-selected").dispatchEvent({ type: "click" });
     await settleApp();
 
-    await document.getElementById("preview-page-list").dispatchEvent({
-      type: "click",
-      target: {
-        dataset: {
-          previewAction: "retry-today",
-        },
-      },
-    });
-    await settleApp();
+    // Prepare inputs
+    const dueDateInput = document.createElement("input");
+    dueDateInput.setAttribute("data-conflict-due-date", "ORD-PENDING");
+    dueDateInput.value = dateKeyAfter(10);
+    document.body.appendChild(dueDateInput);
+
+    const solutionCheckbox = document.createElement("input");
+    solutionCheckbox.type = "checkbox";
+    solutionCheckbox.setAttribute("data-conflict-solution-order", "");
+    solutionCheckbox.checked = true;
+    solutionCheckbox.value = "ORD-PENDING";
+    document.body.appendChild(solutionCheckbox);
+
+    const resolutionCheckbox = document.createElement("input");
+    resolutionCheckbox.type = "checkbox";
+    resolutionCheckbox.setAttribute("data-conflict-resolution-order", "");
+    resolutionCheckbox.checked = true;
+    resolutionCheckbox.value = "ORD-SCHEDULED";
+    document.body.appendChild(resolutionCheckbox);
+
+    const reasonInput = document.createElement("input");
+    reasonInput.id = "conflict-force-reason";
+    document.body.appendChild(reasonInput);
+
+    const triggerAction = async (action, extraAttrs = {}) => {
+      const btn = document.createElement("button");
+      btn.setAttribute("data-preview-action", action);
+      for (const [k, v] of Object.entries(extraAttrs)) {
+        btn.setAttribute(k, v);
+      }
+      await document.getElementById("preview-page-list").dispatchEvent({
+        type: "click",
+        target: btn,
+      });
+      await settleApp();
+    };
+
+    // Trigger actions that keep preview open
+    await triggerAction("retry-today");
 
     failRetryPreview = true;
-    await document.getElementById("preview-page-list").dispatchEvent({
-      type: "click",
-      target: {
-        dataset: {
-          previewAction: "retry-today",
-        },
-      },
-    });
-    await settleApp();
+    await triggerAction("retry-today");
     failRetryPreview = false;
+
+    await triggerAction("retry-suggested-start");
+    await triggerAction("reject-preview-orders");
+
+    // update-conflict-due-date missing value / success
+    await triggerAction("update-conflict-due-date", { "data-order-id": "ORD-MISSING" });
+    await triggerAction("update-conflict-due-date", { "data-order-id": "ORD-PENDING" });
+
+    // preview-conflict-solution choices empty / filled
+    solutionCheckbox.checked = false;
+    await triggerAction("preview-conflict-solution");
+    solutionCheckbox.checked = true;
+    await triggerAction("preview-conflict-solution");
+
+    // retry-manual-force empty reason / cannot force / can force
+    reasonInput.value = "";
+    await triggerAction("retry-manual-force");
+
+    reasonInput.value = "override";
+    mockConflicts = [{ orderId: "ORD-PENDING", earliestFinishDate: dateKeyAfter(12), reason: "insufficient capacity" }];
+    await document.getElementById("preview-selected").dispatchEvent({ type: "click" });
+    await settleApp();
+    await triggerAction("retry-manual-force");
+
+    mockConflicts = [{ orderId: "ORD-PENDING", earliestFinishDate: dateKeyAfter(12), reason: "existing allocations require manual review or reschedule" }];
+    await document.getElementById("preview-selected").dispatchEvent({ type: "click" });
+    await settleApp();
+    await triggerAction("retry-manual-force");
+
+    // Test confirm-schedule-job with manualForce
+    // 1. Without acknowledgement checked
+    await document.getElementById("confirm-schedule-job").dispatchEvent({ type: "click" });
+    await settleApp();
+
+    // 2. With acknowledgement checked
+    const ackBox = document.querySelector("[data-conflict-ack]");
+    if (ackBox) {
+      ackBox.checked = true;
+    }
+    await document.getElementById("confirm-schedule-job").dispatchEvent({ type: "click" });
+    await settleApp();
+
+    // Reset mock conflicts
+    mockConflicts = [];
+    if (getPendingCard()) {
+      await getPendingCard().dispatchEvent({ type: "click", target: getPendingCard() });
+      await settleApp();
+    }
+    await document.getElementById("preview-selected").dispatchEvent({ type: "click" });
+    await settleApp();
+
+    // Trigger actions that close preview
+    await triggerAction("unselect-conflict-order", { "data-order-id": "ORD-PENDING" });
+
+    // Re-open preview for return-workstation
+    if (getPendingCard()) {
+      await getPendingCard().dispatchEvent({ type: "click", target: getPendingCard() });
+      await settleApp();
+    }
+    await document.getElementById("preview-selected").dispatchEvent({ type: "click" });
+    await settleApp();
+
+    await triggerAction("return-workstation");
 
     // 16. Logout
     await document.getElementById("logout-button").dispatchEvent({ type: "click" });

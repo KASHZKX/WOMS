@@ -61,32 +61,36 @@ for (const recordText of records) {
 
 const output = [];
 for (const record of bySource.values()) {
-  output.push(`SF:${record.source}`);
-  for (const [name, lineNo] of [...record.functions.entries()].sort((a, b) => Number(a[1]) - Number(b[1]) || a[0].localeCompare(b[0]))) {
-    output.push(`FN:${lineNo},${name}`);
-  }
-  for (const [name, hits] of [...record.functionHits.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
-    output.push(`FNDA:${hits},${name}`);
-  }
+  const fns = [...record.functions.entries()]
+    .sort((a, b) => Number(a[1]) - Number(b[1]) || a[0].localeCompare(b[0]))
+    .map(([name, lineNo]) => `FN:${lineNo},${name}`);
+
+  const fnHits = [...record.functionHits.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([name, hits]) => `FNDA:${hits},${name}`);
+
+  const branches = [...record.branches.entries()]
+    .sort((a, b) => {
+      const left = a[0].split(",").map(Number);
+      const right = b[0].split(",").map(Number);
+      return left[0] - right[0] || left[1] - right[1] || left[2] - right[2];
+    })
+    .map(([key, hits]) => `BRDA:${key},${hits}`);
+
+  const lines = [...record.lines.entries()]
+    .sort((a, b) => Number(a[0]) - Number(b[0]))
+    .map(([lineNo, hits]) => `DA:${lineNo},${hits}`);
+
   output.push(
+    `SF:${record.source}`,
+    ...fns,
+    ...fnHits,
     `FNF:${record.functions.size}`,
-    `FNH:${[...record.functionHits.values()].filter((hits) => hits > 0).length}`
-  );
-  for (const [key, hits] of [...record.branches.entries()].sort((a, b) => {
-    const left = a[0].split(",").map(Number);
-    const right = b[0].split(",").map(Number);
-    return left[0] - right[0] || left[1] - right[1] || left[2] - right[2];
-  })) {
-    output.push(`BRDA:${key},${hits}`);
-  }
-  output.push(
+    `FNH:${[...record.functionHits.values()].filter((hits) => hits > 0).length}`,
+    ...branches,
     `BRF:${record.branches.size}`,
-    `BRH:${[...record.branches.values()].filter((hits) => hits > 0).length}`
-  );
-  for (const [lineNo, hits] of [...record.lines.entries()].sort((a, b) => Number(a[0]) - Number(b[0]))) {
-    output.push(`DA:${lineNo},${hits}`);
-  }
-  output.push(
+    `BRH:${[...record.branches.values()].filter((hits) => hits > 0).length}`,
+    ...lines,
     `LF:${record.lines.size}`,
     `LH:${[...record.lines.values()].filter((hits) => hits > 0).length}`,
     "end_of_record"
