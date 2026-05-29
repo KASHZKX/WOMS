@@ -275,12 +275,14 @@ function naturalOrderNumber(value) {
   return suffix ? Number(suffix) : Number.MAX_SAFE_INTEGER;
 }
 
+const naturalCollator = new Intl.Collator("und", { numeric: true });
+
 export function compareOrderIds(a, b) {
   return compareNatural(a, b);
 }
 
 export function compareNatural(a, b) {
-  return String(a).localeCompare(String(b), undefined, { numeric: true });
+  return naturalCollator.compare(String(a), String(b));
 }
 
 function waterlineColor(ratio) {
