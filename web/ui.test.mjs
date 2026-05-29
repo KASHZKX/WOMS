@@ -2,6 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
+  compareOrderIds,
+  compareNatural,
   defaultLine,
   conflictExplanation,
   customerFilterValues,
@@ -323,6 +325,40 @@ test("sortOrdersForWorkstation keeps trailing-number ordering and non-numeric fa
     { id: "ORD-2", dueDate: "2026-04-30", priority: "low" },
   ];
   assert.deepEqual(sortOrdersForWorkstation(orders).map((item) => item.id), ["ORD-2", "ORD-10", "ORD-A", "ORD-B"]);
+});
+
+test("compareOrderIds avoids sorting elements alphabetically and sorts naturally", () => {
+  const ids = ["ORD-10", "ORD-2", "ORD-B", "ORD-A"];
+  assert.deepEqual([...ids].sort(compareOrderIds), ["ORD-2", "ORD-10", "ORD-A", "ORD-B"]);
+});
+
+test("compareOrderIds handles parent and child remainder order IDs correctly", () => {
+  const ids = ["ORD-0000002-1", "ORD-0000001-2", "ORD-0000001", "ORD-0000001-1"];
+  assert.deepEqual(
+    [...ids].sort(compareOrderIds),
+    ["ORD-0000001", "ORD-0000001-1", "ORD-0000001-2", "ORD-0000002-1"]
+  );
+});
+
+test("compareOrderIds avoids equivalence collision for parents and child suffixes of 0", () => {
+  const ids = ["ORD-0000001-0", "ORD-0000001"];
+  assert.deepEqual(
+    [...ids].sort(compareOrderIds),
+    ["ORD-0000001", "ORD-0000001-0"]
+  );
+});
+
+test("compareOrderIds handles parent and child remainder order IDs with hyphens in parent ID correctly", () => {
+  const ids = ["ORD-PROD-12-1", "ORD-PROD-2", "ORD-PROD-12"];
+  assert.deepEqual(
+    [...ids].sort(compareOrderIds),
+    ["ORD-PROD-2", "ORD-PROD-12", "ORD-PROD-12-1"]
+  );
+});
+
+test("compareNatural sorts elements naturally rather than alphabetically", () => {
+  const lines = ["Line 10", "Line 2", "Line B", "Line A"];
+  assert.deepEqual([...lines].sort(compareNatural), ["Line 2", "Line 10", "Line A", "Line B"]);
 });
 
 test("isChildOrderId accepts only ORD parent ids with numeric child suffixes", () => {

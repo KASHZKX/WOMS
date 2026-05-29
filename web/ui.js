@@ -77,7 +77,7 @@ export function isChildOrderId(orderId) {
 }
 
 export function defaultLine(lines) {
-  return [...lines].map((line) => typeof line === "string" ? line : line.id).sort()[0] ?? "";
+  return [...lines].map((line) => typeof line === "string" ? line : line.id).sort(compareNatural)[0] ?? "";
 }
 
 export function lineScopedOrders(orders, lineId) {
@@ -116,7 +116,7 @@ export function conflictExplanation(conflict) {
 }
 
 export function uniqueValues(items, key) {
-  return Array.from(new Set(items.map((item) => item[key]).filter(Boolean))).sort();
+  return Array.from(new Set(items.map((item) => item[key]).filter(Boolean))).sort(compareNatural);
 }
 
 export function statusCounts(orders) {
@@ -273,6 +273,16 @@ function dateValue(value) {
 function naturalOrderNumber(value) {
   const suffix = trailingAsciiDigits(value);
   return suffix ? Number(suffix) : Number.MAX_SAFE_INTEGER;
+}
+
+const naturalCollator = new Intl.Collator("und", { numeric: true });
+
+export function compareOrderIds(a, b) {
+  return compareNatural(a, b);
+}
+
+export function compareNatural(a, b) {
+  return naturalCollator.compare(String(a), String(b));
 }
 
 function waterlineColor(ratio) {
