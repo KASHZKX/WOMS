@@ -8,5 +8,5 @@ RUN chmod 755 /docker-entrypoint.d/40-resolver.sh \
     && chmod 644 /etc/nginx/templates/default.conf.template \
     && chmod -R a+rX /usr/share/nginx/html \
     && chown -R nginx:nginx /var/cache/nginx /var/run /etc/nginx/conf.d /var/log/nginx
-USER nginx
+USER 101
 EXPOSE 8080

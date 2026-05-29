@@ -15,14 +15,10 @@
       <h1>WOMS</h1>
     </div>
     <form id="login-form" class="login-bar">
-      <label>
-        <span>帳號</span>
-        <input type="text" name="username" value="sales" autocomplete="username">
-      </label>
-      <label>
-        <span>密碼</span>
-        <input name="password" value="demo" type="password" autocomplete="current-password">
-      </label>
+      <label for="login-username">帳號</label>
+      <input type="text" id="login-username" name="username" value="sales" autocomplete="username">
+      <label for="login-password">密碼</label>
+      <input id="login-password" name="password" value="demo" type="password" autocomplete="current-password">
       <button type="submit">登入</button>
     </form>
   </section>
@@ -325,7 +321,7 @@
     </form>
   </dialog>
 
-  <dialog id="reject-dialog" class="message-dialog">
+  <dialog id="reject-dialog" class="message-dialog" aria-labelledby="reject-title">
     <form method="dialog">
       <h2 id="reject-title">駁回訂單</h2>
       <p>請填寫駁回理由，Sales 會在需處理區看到此訂單。</p>
@@ -337,7 +333,7 @@
     </form>
   </dialog>
 
-  <dialog id="message-dialog" class="message-dialog">
+  <dialog id="message-dialog" class="message-dialog" aria-labelledby="message-title">
     <form method="dialog">
       <h2 id="message-title">提示</h2>
       <p id="message-body"></p>
