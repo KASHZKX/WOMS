@@ -27,6 +27,8 @@ if [ "$status" -ne 0 ]; then
   exit "$status"
 fi
 
+node ./scripts/merge-lcov.mjs coverage/lcov.info
+
 actual_coverage="$(printf '%s\n' "$coverage_output" | awk -F '|' '/# all files/ {gsub(/ /, "", $2); print $2}')"
 if [ -z "$actual_coverage" ]; then
   echo "Unable to determine web line coverage from Node coverage output." >&2
