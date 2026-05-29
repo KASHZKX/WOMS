@@ -8,5 +8,5 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o /out/woms-scheduler-worker ./cmd/schedu
 
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/woms-scheduler-worker /woms-scheduler-worker
-USER 65532:65532
+USER nonroot:nonroot
 ENTRYPOINT ["/woms-scheduler-worker"]
