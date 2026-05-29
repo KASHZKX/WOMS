@@ -19,7 +19,7 @@ func TestNoopScheduleJobPublisher(t *testing.T) {
 
 func TestKafkaScheduleJobPublisher_ClosedWriter(t *testing.T) {
 	pub := NewKafkaScheduleJobPublisher([]string{"localhost:9092"}, "test-topic")
-	
+
 	// Close it immediately
 	if err := pub.Close(); err != nil {
 		t.Errorf("expected no error closing uninitialized writer, got %v", err)

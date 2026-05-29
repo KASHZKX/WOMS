@@ -357,14 +357,14 @@ func TestMockRedisTokenSessionStore(t *testing.T) {
 	if err := mem.Close(); err != nil {
 		t.Errorf("memory.Close failed: %v", err)
 	}
-	
+
 	ctx := context.Background()
 	claims := auth.Claims{
 		Subject: "user",
 		Role:    domain.RoleSales,
 		Expires: time.Now().Add(5 * time.Minute).Unix(),
 	}
-	
+
 	// Save invalid
 	if err := mem.Save(ctx, "", claims); !errors.Is(err, ErrTokenSessionNotFound) {
 		t.Errorf("expected ErrTokenSessionNotFound for empty token, got %v", err)
@@ -377,28 +377,28 @@ func TestMockRedisTokenSessionStore(t *testing.T) {
 	if err := mem.Save(ctx, "mytoken", expiredClaims); !errors.Is(err, ErrTokenSessionNotFound) {
 		t.Errorf("expected ErrTokenSessionNotFound for expired claims, got %v", err)
 	}
-	
+
 	// Save valid
 	if err := mem.Save(ctx, "mytoken", claims); err != nil {
 		t.Fatalf("failed to save: %v", err)
 	}
-	
+
 	// Verify valid
 	if err := mem.Verify(ctx, "mytoken", claims); err != nil {
 		t.Fatalf("failed to verify: %v", err)
 	}
-	
+
 	// Verify missing
 	if err := mem.Verify(ctx, "wrongtoken", claims); !errors.Is(err, ErrTokenSessionNotFound) {
 		t.Errorf("expected ErrTokenSessionNotFound for missing token, got %v", err)
 	}
-	
+
 	// Verify expired entry
 	mem.sessions[tokenSessionKey("mytoken")] = time.Now().Add(-1 * time.Second)
 	if err := mem.Verify(ctx, "mytoken", claims); !errors.Is(err, ErrTokenSessionNotFound) {
 		t.Errorf("expected ErrTokenSessionNotFound for expired saved token, got %v", err)
 	}
-	
+
 	// Revoke
 	_ = mem.Save(ctx, "mytoken", claims)
 	revoked, err := mem.Revoke(ctx, "mytoken")
@@ -530,4 +530,3 @@ func TestRedisTokenSessionStoreErrors(t *testing.T) {
 		t.Error("expected connection error, got nil")
 	}
 }
-
