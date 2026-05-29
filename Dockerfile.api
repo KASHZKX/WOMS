@@ -15,4 +15,5 @@ COPY --from=build /out/woms-api /woms-api
 COPY --from=build /out/healthcheck /healthcheck
 COPY --from=build /src/db /db
 EXPOSE 8080
+USER nonroot:nonroot
 ENTRYPOINT ["/woms-api"]
