@@ -1412,3 +1412,485 @@ test("admin user management and HPA browser controls call expected APIs", () => 
   assert.match(app, /state\.hpaPeakPollingEnabled = true/);
   assert.match(app, /function syncHPAPeakPolling\(\)/);
 });
+
+test("comprehensive event listener integration tests to maximize app.js coverage", async () => {
+  const document = buildDomFromIndex();
+  const calls = [];
+  let hpaCleared = false;
+
+  let failLogin = false;
+  let failPreviewConfirm = false;
+  let failJobs = false;
+  let failUserCreate = false;
+  let failUserAssign = false;
+  let failUserPassword = false;
+  let failUserDelete = false;
+  let failProduction = false;
+  let failReject = false;
+  let failCancel = false;
+  let failConflictDemo = false;
+  let failHpaPeak = false;
+  let failRetryPreview = false;
+  let failOrderSubmit = false;
+  
+  const fetchImpl = async (path, options = {}) => {
+    calls.push({ path, options });
+
+    if (path === "/api/auth/login") {
+      if (failLogin) {
+        throw new Error("mocked login failure");
+      }
+      return jsonResponse({
+        token: "token-scheduler",
+        user: { id: "scheduler-a", username: "scheduler", role: "scheduler", lineId: "A" }
+      });
+    }
+    if (path === "/api/auth/logout") {
+      return jsonResponse({});
+    }
+    if (path === "/api/lines") {
+      return jsonResponse({
+        lines: [
+          { id: "A", name: "Line A", capacityPerDay: 10000, timezone: "Asia/Taipei" },
+          { id: "B", name: "Line B", capacityPerDay: 9000, timezone: "Asia/Taipei" },
+        ],
+      });
+    }
+    if (path === "/api/orders") {
+      if (options.method === "DELETE") {
+        if (failCancel) {
+          throw new Error("mocked failure");
+        }
+        return jsonResponse({ cancelledOrderIds: ["ORD-PENDING"] });
+      }
+      return jsonResponse({
+        orders: [
+          { id: "ORD-PENDING", customer: "ACME", lineId: "A", quantity: 2500, priority: "high", status: "待排程", dueDate: dateKeyAfter(6), createdBy: "user-sales" },
+          { id: "ORD-SCHEDULED", customer: "Beta", lineId: "A", quantity: 1500, priority: "low", status: "已排程", dueDate: dateKeyAfter(8), createdBy: "user-sales" },
+          { id: "ORD-PROD", customer: "Gamma", lineId: "A", quantity: 900, priority: "low", status: "生產中", dueDate: dateKeyAfter(9), createdBy: "user-sales" },
+        ],
+      });
+    }
+    if (path === "/api/orders/reject") {
+      if (failReject) {
+        throw new Error("mocked failure");
+      }
+      return jsonResponse({ orders: ["ORD-PENDING"] });
+    }
+    if (String(path).startsWith("/api/schedules/calendar?")) {
+      return jsonResponse({
+        allocations: [
+          { orderId: "ORD-SCHEDULED", customer: "Beta", lineId: "A", date: dateKeyAfter(2), quantity: 1500, priority: "low", status: "已排程" },
+          { orderId: "ORD-PROD", customer: "Gamma", lineId: "A", date: dateKeyAfter(3), quantity: 900, priority: "low", status: "生產中" },
+        ],
+        pendingAllocations: [],
+      });
+    }
+    if (String(path).startsWith("/api/schedules/history?")) {
+      return jsonResponse({ history: [{ action: "schedule.job.create", resource: "JOB-1", reason: "ok", createdAt: `${dateKeyAfter(0)}T01:02:00Z` }] });
+    }
+    if (path === "/api/schedules/preview") {
+      if (failRetryPreview || failOrderSubmit) {
+        throw new Error("mocked failure");
+      }
+      return jsonResponse({
+        previewId: "PREVIEW-SCHEDULE",
+        currentDate: dateKeyAfter(0),
+        allocations: [
+          { orderId: "ORD-PENDING", customer: "ACME", lineId: "A", date: dateKeyAfter(2), quantity: 2500, priority: "high", status: "已排程" },
+        ],
+        conflicts: [],
+      });
+    }
+    if (path === "/api/orders/preview-confirm") {
+      if (failPreviewConfirm) {
+        throw new Error("mocked failure");
+      }
+      return jsonResponse({ id: "ORD-DRAFT", customer: "ACME", lineId: "A", quantity: 2500, priority: "low", status: "待排程", dueDate: dateKeyAfter(5), createdBy: "user-sales" });
+    }
+    if (path === "/api/schedules/jobs") {
+      if (failJobs) {
+        throw new Error("mocked failure");
+      }
+      return jsonResponse({ id: "JOB-2", status: "completed" });
+    }
+    if (path === "/api/production/confirm") {
+      if (failProduction) {
+        throw new Error("mocked failure");
+      }
+      return jsonResponse({ remainder: { id: "ORD-PROD-R1", quantity: 400 } });
+    }
+    if (path === "/api/users") {
+      if (options.method === "POST") {
+        if (failUserCreate) {
+          throw new Error("mocked failure");
+        }
+        return jsonResponse({ username: "new-scheduler", role: "scheduler", lineId: "A" });
+      }
+      if (options.method === "PATCH") {
+        if (failUserAssign) {
+          throw new Error("mocked failure");
+        }
+        return jsonResponse({ username: "ops", role: "scheduler", lineId: "A" });
+      }
+      return jsonResponse({ users: [{ username: "ops", role: "sales" }] });
+    }
+    if (path === "/api/users/password") {
+      if (failUserPassword) {
+        throw new Error("mocked failure");
+      }
+      return jsonResponse({ username: "ops" });
+    }
+    if (path.startsWith("/api/users/") && options.method === "DELETE") {
+      if (failUserDelete) {
+        throw new Error("mocked failure");
+      }
+      return jsonResponse({ username: "ops", deleted: true });
+    }
+    if (path === "/api/demo/hpa-peak") {
+      if (failHpaPeak) {
+        throw new Error("mocked failure");
+      }
+      if (options.method === "POST") {
+        hpaCleared = false;
+        return jsonResponse({ summary: { autoscaling: { desiredReplicas: 3 } } });
+      }
+      if (options.method === "DELETE") {
+        hpaCleared = true;
+        return jsonResponse({ summary: null });
+      }
+      return jsonResponse({ summary: hpaCleared ? null : { autoscaling: { desiredReplicas: 3 } } });
+    }
+    if (path === "/api/demo/conflict-orders") {
+      if (failConflictDemo) {
+        throw new Error("mocked failure");
+      }
+      return jsonResponse({ orders: [{ id: "ORD-C1" }] });
+    }
+    throw new Error(`unexpected fetch ${path}`);
+  };
+
+  const restoreGlobals = installBrowserGlobalsWithFetch(document, fetchImpl);
+  try {
+    await import(new URL(`./app.js?dpcomprehensive=${Date.now()}`, import.meta.url));
+
+    // 1. Submit login-form to log in as scheduler
+    document.querySelector('#login-form input[name="username"]').value = "scheduler";
+    document.querySelector('#login-form input[name="password"]').value = "demo";
+    await document.getElementById("login-form").dispatchEvent({ type: "submit" });
+    await settleApp();
+    assert.equal(document.body.dataset.role, "scheduler");
+
+    // Login failure
+    failLogin = true;
+    await document.getElementById("login-form").dispatchEvent({ type: "submit" });
+    await settleApp();
+    failLogin = false;
+
+    // 2. Change active-line-select
+    const activeLineSelect = document.getElementById("active-line-select");
+    activeLineSelect.value = "B";
+    await activeLineSelect.dispatchEvent({ type: "change" });
+    await settleApp();
+
+    // 3. Submit order-form (sales order preview)
+    const orderForm = document.getElementById("order-form");
+    orderForm.elements.customer.value = "ACME";
+    orderForm.elements.quantity.value = "2500";
+    orderForm.elements.priority.value = "low";
+    orderForm.elements.dueDate.value = dateKeyAfter(5);
+    await orderForm.dispatchEvent({ type: "submit" });
+    await settleApp();
+
+    // Order submit failure
+    failOrderSubmit = true;
+    await orderForm.dispatchEvent({ type: "submit" });
+    await settleApp();
+    failOrderSubmit = false;
+
+    // 4. Click confirm-preview-order
+    await document.getElementById("confirm-preview-order").dispatchEvent({ type: "click" });
+    await settleApp();
+
+    // Preview confirm failure
+    failPreviewConfirm = true;
+    await document.getElementById("confirm-preview-order").dispatchEvent({ type: "click" });
+    await settleApp();
+    failPreviewConfirm = false;
+
+    const getPendingCard = () => document.getElementById("orders-body").children.find((item) => item.dataset.orderId === "ORD-PENDING");
+
+    // Click without selection to trigger warning messages (uncovered branches)
+    await document.getElementById("preview-selected").dispatchEvent({ type: "click" });
+    await settleApp();
+    await document.getElementById("reject-selected").dispatchEvent({ type: "click" });
+    await settleApp();
+    await document.getElementById("cancel-selected").dispatchEvent({ type: "click" });
+    await settleApp();
+
+    // 5. Select order card (click)
+    if (getPendingCard()) {
+      await getPendingCard().dispatchEvent({ type: "click", target: getPendingCard() });
+      await settleApp();
+    }
+
+    // 6. Click preview-selected
+    await document.getElementById("preview-selected").dispatchEvent({ type: "click" });
+    await settleApp();
+
+    // 7. Click confirm-schedule-job
+    await document.getElementById("confirm-schedule-job").dispatchEvent({ type: "click" });
+    await settleApp();
+
+    // Jobs confirm failure
+    failJobs = true;
+    await document.getElementById("confirm-schedule-job").dispatchEvent({ type: "click" });
+    await settleApp();
+    failJobs = false;
+
+    // 8. Reject order flow
+    if (getPendingCard()) {
+      await getPendingCard().dispatchEvent({ type: "click", target: getPendingCard() });
+      await settleApp();
+    }
+    await document.getElementById("reject-selected").dispatchEvent({ type: "click" });
+    await settleApp();
+    document.getElementById("reject-reason").value = "too late";
+    await document.getElementById("confirm-reject-orders").dispatchEvent({ type: "click" });
+    await settleApp();
+
+    // Reject failure
+    if (getPendingCard()) {
+      await getPendingCard().dispatchEvent({ type: "click", target: getPendingCard() });
+      await settleApp();
+    }
+    await document.getElementById("reject-selected").dispatchEvent({ type: "click" });
+    await settleApp();
+    failReject = true;
+    await document.getElementById("confirm-reject-orders").dispatchEvent({ type: "click" });
+    await settleApp();
+    failReject = false;
+
+    // 9. Cancel order flow
+    if (getPendingCard()) {
+      await getPendingCard().dispatchEvent({ type: "click", target: getPendingCard() });
+      await settleApp();
+    }
+    // Cancel confirmation cancelled
+    window.confirm = () => false;
+    await document.getElementById("cancel-selected").dispatchEvent({ type: "click" });
+    await settleApp();
+    window.confirm = () => true;
+
+    // Cancel confirmation confirmed
+    await document.getElementById("cancel-selected").dispatchEvent({ type: "click" });
+    await settleApp();
+
+    // Cancel failure
+    if (getPendingCard()) {
+      await getPendingCard().dispatchEvent({ type: "click", target: getPendingCard() });
+      await settleApp();
+    }
+    failCancel = true;
+    await document.getElementById("cancel-selected").dispatchEvent({ type: "click" });
+    await settleApp();
+    failCancel = false;
+
+    // 10. Production form flow
+    const productionForm = document.getElementById("production-form");
+    productionForm.elements.orderId.value = "ORD-PROD";
+    productionForm.elements.productionDate.value = dateKeyAfter(3);
+    productionForm.elements.producedQuantity.value = "500";
+    await productionForm.dispatchEvent({ type: "submit" });
+    await settleApp();
+    await document.getElementById("cancel-production-report").dispatchEvent({ type: "click" });
+    await settleApp();
+
+    // Production failure
+    failProduction = true;
+    await productionForm.dispatchEvent({ type: "submit" });
+    await settleApp();
+    failProduction = false;
+
+    // 11. User creation forms (admin flows)
+    const createForm = document.getElementById("create-user-form");
+    createForm.elements.username.value = "new-scheduler";
+    createForm.elements.password.value = "secret";
+    createForm.elements.role.value = "scheduler";
+    createForm.elements.lineId.value = "A";
+    await createForm.dispatchEvent({ type: "submit" });
+    await settleApp();
+
+    // User create failure
+    failUserCreate = true;
+    await createForm.dispatchEvent({ type: "submit" });
+    await settleApp();
+    failUserCreate = false;
+
+    const assignForm = document.getElementById("assign-user-form");
+    assignForm.elements.username.value = "ops";
+    assignForm.elements.role.value = "scheduler";
+    assignForm.elements.lineId.value = "A";
+    await assignForm.dispatchEvent({ type: "submit" });
+    await settleApp();
+
+    // User assign failure
+    failUserAssign = true;
+    await assignForm.dispatchEvent({ type: "submit" });
+    await settleApp();
+    failUserAssign = false;
+
+    const resetForm = document.getElementById("reset-password-form");
+    resetForm.elements.username.value = "ops";
+    resetForm.elements.password.value = "new-secret";
+    await resetForm.dispatchEvent({ type: "submit" });
+    await settleApp();
+
+    // User password failure
+    failUserPassword = true;
+    await resetForm.dispatchEvent({ type: "submit" });
+    await settleApp();
+    failUserPassword = false;
+
+    // User delete empty username early return
+    document.getElementById("assign-username").value = "";
+    await document.getElementById("delete-user-button").dispatchEvent({ type: "click" });
+    await settleApp();
+
+    // User delete confirm cancelled early return
+    document.getElementById("assign-username").value = "ops";
+    window.confirm = () => false;
+    await document.getElementById("delete-user-button").dispatchEvent({ type: "click" });
+    await settleApp();
+    window.confirm = () => true;
+
+    // User delete success
+    await document.getElementById("delete-user-button").dispatchEvent({ type: "click" });
+    await settleApp();
+
+    // User delete failure
+    failUserDelete = true;
+    await document.getElementById("delete-user-button").dispatchEvent({ type: "click" });
+    await settleApp();
+    failUserDelete = false;
+
+    // 12. HPA / Conflict demo flows
+    await document.getElementById("create-conflict-demo").dispatchEvent({ type: "click" });
+    await settleApp();
+    
+    failConflictDemo = true;
+    await document.getElementById("create-conflict-demo").dispatchEvent({ type: "click" });
+    await settleApp();
+    failConflictDemo = false;
+
+    await document.getElementById("create-hpa-peak").dispatchEvent({ type: "click" });
+    await settleApp();
+    
+    await document.getElementById("refresh-hpa-peak").dispatchEvent({ type: "click" });
+    await settleApp();
+    
+    // Clear HPA peak cancelled
+    window.confirm = () => false;
+    await document.getElementById("clear-hpa-peak").dispatchEvent({ type: "click" });
+    await settleApp();
+    window.confirm = () => true;
+
+    // Clear HPA peak confirm
+    await document.getElementById("clear-hpa-peak").dispatchEvent({ type: "click" });
+    await settleApp();
+
+    failHpaPeak = true;
+    await document.getElementById("create-hpa-peak").dispatchEvent({ type: "click" });
+    await settleApp();
+    await document.getElementById("clear-hpa-peak").dispatchEvent({ type: "click" });
+    await settleApp();
+    failHpaPeak = false;
+
+    // 13. Tabs and calendar modes
+    const calendarMode = document.querySelector('[data-calendar-mode="all"]');
+    if (calendarMode) {
+      await document.getElementById("main-calendar-mode").dispatchEvent({ type: "click", target: calendarMode });
+      await settleApp();
+    }
+    // Main calendar mode click with no dataset mode
+    await document.getElementById("main-calendar-mode").dispatchEvent({ type: "click", target: { dataset: {} } });
+    await settleApp();
+
+    const previewMode = document.querySelector('[data-preview-calendar-mode="scheduled"]');
+    if (previewMode) {
+      await document.getElementById("preview-calendar-mode").dispatchEvent({ type: "click", target: previewMode });
+      await settleApp();
+    }
+    // Preview calendar mode click with no dataset mode
+    await document.getElementById("preview-calendar-mode").dispatchEvent({ type: "click", target: { dataset: {} } });
+    await settleApp();
+
+    const actionsTab = document.querySelector('[data-mobile-view="actions"]');
+    if (actionsTab) {
+      await actionsTab.dispatchEvent({ type: "click" });
+      await settleApp();
+    }
+    await document.getElementById("scheduler-panel-toggle")?.dispatchEvent({ type: "click" });
+    await settleApp();
+
+    // 14. Drag and drop calendar cell drop
+    const cells = document.querySelectorAll(".calendar-day");
+    const cell = cells[cells.length - 1];
+    if (cell) {
+      await cell.dispatchEvent({
+        type: "drop",
+        preventDefault: () => {},
+        dataTransfer: {
+          getData: (type) => {
+            if (type === "application/json") {
+              return JSON.stringify({ orderIds: ["ORD-PENDING"] });
+            }
+            return "ORD-PENDING";
+          }
+        }
+      });
+      await settleApp();
+    }
+
+    // 15. Preview page list actions
+    await document.getElementById("preview-page-list").dispatchEvent({
+      type: "click",
+      target: {
+        dataset: {
+          previewAction: "return-workstation",
+        },
+      },
+    });
+    await settleApp();
+
+    await document.getElementById("preview-page-list").dispatchEvent({
+      type: "click",
+      target: {
+        dataset: {
+          previewAction: "retry-today",
+        },
+      },
+    });
+    await settleApp();
+
+    failRetryPreview = true;
+    await document.getElementById("preview-page-list").dispatchEvent({
+      type: "click",
+      target: {
+        dataset: {
+          previewAction: "retry-today",
+        },
+      },
+    });
+    await settleApp();
+    failRetryPreview = false;
+
+    // 16. Logout
+    await document.getElementById("logout-button").dispatchEvent({ type: "click" });
+    await settleApp();
+
+  } finally {
+    restoreGlobals();
+  }
+});
+

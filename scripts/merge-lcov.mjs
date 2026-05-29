@@ -68,8 +68,10 @@ for (const record of bySource.values()) {
   for (const [name, hits] of [...record.functionHits.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
     output.push(`FNDA:${hits},${name}`);
   }
-  output.push(`FNF:${record.functions.size}`);
-  output.push(`FNH:${[...record.functionHits.values()].filter((hits) => hits > 0).length}`);
+  output.push(
+    `FNF:${record.functions.size}`,
+    `FNH:${[...record.functionHits.values()].filter((hits) => hits > 0).length}`
+  );
   for (const [key, hits] of [...record.branches.entries()].sort((a, b) => {
     const left = a[0].split(",").map(Number);
     const right = b[0].split(",").map(Number);
@@ -77,14 +79,18 @@ for (const record of bySource.values()) {
   })) {
     output.push(`BRDA:${key},${hits}`);
   }
-  output.push(`BRF:${record.branches.size}`);
-  output.push(`BRH:${[...record.branches.values()].filter((hits) => hits > 0).length}`);
+  output.push(
+    `BRF:${record.branches.size}`,
+    `BRH:${[...record.branches.values()].filter((hits) => hits > 0).length}`
+  );
   for (const [lineNo, hits] of [...record.lines.entries()].sort((a, b) => Number(a[0]) - Number(b[0]))) {
     output.push(`DA:${lineNo},${hits}`);
   }
-  output.push(`LF:${record.lines.size}`);
-  output.push(`LH:${[...record.lines.values()].filter((hits) => hits > 0).length}`);
-  output.push("end_of_record");
+  output.push(
+    `LF:${record.lines.size}`,
+    `LH:${[...record.lines.values()].filter((hits) => hits > 0).length}`,
+    "end_of_record"
+  );
 }
 
 writeFileSync(file, `${output.join("\n")}\n`);
