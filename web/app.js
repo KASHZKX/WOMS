@@ -8,6 +8,7 @@ import {
   exactFilterOrders,
   filtersForCreatedOrder,
   groupAllocationsByDate,
+  isChildOrderId,
   lineScopedOrders,
   mergePreviewCalendarAllocations,
   monthGrid,
@@ -1643,11 +1644,6 @@ function isNewChildScheduledAllocation(allocation) {
     return false;
   }
   return !state.calendarAllocations.some((item) => item.orderId === allocation.orderId);
-}
-
-function isChildOrderId(orderId) {
-  const match = String(orderId).match(/^(ORD-[^-]+)-(\d+)$/);
-  return Boolean(match && Number.isFinite(Number(match[2])));
 }
 
 function calendarDisplayQuantity(allocation) {

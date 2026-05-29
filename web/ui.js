@@ -43,6 +43,39 @@ export function sortOrdersForWorkstation(orders) {
   });
 }
 
+export function trailingAsciiDigits(value) {
+  const text = String(value);
+  let start = text.length;
+  while (start > 0) {
+    const code = text.charCodeAt(start - 1);
+    if (code < 48 || code > 57) {
+      break;
+    }
+    start -= 1;
+  }
+  return start === text.length ? "" : text.slice(start);
+}
+
+export function isChildOrderId(orderId) {
+  const value = String(orderId);
+  if (!value.startsWith("ORD-")) {
+    return false;
+  }
+  const childSuffix = trailingAsciiDigits(value);
+  if (!childSuffix) {
+    return false;
+  }
+  const separatorIndex = value.length - childSuffix.length - 1;
+  if (separatorIndex < 4 || value[separatorIndex] !== "-") {
+    return false;
+  }
+  const parentSegment = value.slice(4, separatorIndex);
+  if (!parentSegment || parentSegment.includes("-")) {
+    return false;
+  }
+  return Number.isFinite(Number(childSuffix));
+}
+
 export function defaultLine(lines) {
   return [...lines].map((line) => typeof line === "string" ? line : line.id).sort()[0] ?? "";
 }
@@ -238,8 +271,8 @@ function dateValue(value) {
 }
 
 function naturalOrderNumber(value) {
-  const match = String(value).match(/(\d+)$/);
-  return match ? Number(match[1]) : Number.MAX_SAFE_INTEGER;
+  const suffix = trailingAsciiDigits(value);
+  return suffix ? Number(suffix) : Number.MAX_SAFE_INTEGER;
 }
 
 function waterlineColor(ratio) {

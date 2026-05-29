@@ -10,6 +10,7 @@ import {
   exactFilterOrders,
   filtersForCreatedOrder,
   groupAllocationsByDate,
+  isChildOrderId,
   isFutureDateKey,
   lineScopedOrders,
   mergePreviewCalendarAllocations,
@@ -312,6 +313,28 @@ test("sortOrdersForWorkstation sorts by priority, due date, and natural order nu
     { id: "ORD-0000006", status: "待排程", dueDate: "2026-04-30", priority: "low" },
   ];
   assert.deepEqual(sortOrdersForWorkstation(orders).map((item) => item.id), ["ORD-0000001", "ORD-0000006", "ORD-0000007", "ORD-0000010", "ORD-0000002"]);
+});
+
+test("sortOrdersForWorkstation keeps trailing-number ordering and non-numeric fallback", () => {
+  const orders = [
+    { id: "ORD-B", dueDate: "2026-04-30", priority: "low" },
+    { id: "ORD-10", dueDate: "2026-04-30", priority: "low" },
+    { id: "ORD-A", dueDate: "2026-04-30", priority: "low" },
+    { id: "ORD-2", dueDate: "2026-04-30", priority: "low" },
+  ];
+  assert.deepEqual(sortOrdersForWorkstation(orders).map((item) => item.id), ["ORD-2", "ORD-10", "ORD-A", "ORD-B"]);
+});
+
+test("isChildOrderId accepts only ORD parent ids with numeric child suffixes", () => {
+  assert.equal(isChildOrderId("ORD-ABC-1"), true);
+  assert.equal(isChildOrderId("ORD-0000001-0002"), true);
+  assert.equal(isChildOrderId("ORD--1"), false);
+  assert.equal(isChildOrderId("ORD-ABC-"), false);
+  assert.equal(isChildOrderId("ORD-ABC-X"), false);
+  assert.equal(isChildOrderId("ORD-ABC-1-X"), false);
+  assert.equal(isChildOrderId("ORD-ABC-1X"), false);
+  assert.equal(isChildOrderId("ORD-ABC-DEF-1"), false);
+  assert.equal(isChildOrderId("PO-ABC-1"), false);
 });
 
 test("uniqueValues and statusCounts provide sidebar/filter data", () => {

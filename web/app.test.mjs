@@ -79,6 +79,16 @@ class MiniElement {
     return this._innerHTML;
   }
 
+  get elements() {
+    const controls = {};
+    for (const child of walk(this)) {
+      if (child.name) {
+        controls[child.name] = child;
+      }
+    }
+    return controls;
+  }
+
   setAttribute(name, value) {
     const stringValue = String(value);
     this.attributes.set(name, stringValue);
@@ -305,6 +315,18 @@ function buildDomFromIndex() {
   addNamedControl(byId("production-form"), "input", "orderId");
   addNamedControl(byId("production-form"), "input", "productionDate");
   addNamedControl(byId("production-form"), "input", "producedQuantity");
+  addNamedControl(byId("create-user-form"), "input", "username");
+  addNamedControl(byId("create-user-form"), "input", "password");
+  addNamedControl(byId("create-user-form"), "select", "role", "sales");
+  addNamedControl(byId("create-user-form"), "select", "lineId");
+  byId("assign-username").setAttribute("name", "username");
+  byId("assign-user-form").appendChild(byId("assign-username"));
+  addNamedControl(byId("assign-user-form"), "select", "role", "sales");
+  byId("assign-line").setAttribute("name", "lineId");
+  byId("assign-user-form").appendChild(byId("assign-line"));
+  byId("reset-password-username").setAttribute("name", "username");
+  byId("reset-password-form").appendChild(byId("reset-password-username"));
+  addNamedControl(byId("reset-password-form"), "input", "password");
 
   for (const mode of ["pending", "scheduled", "all"]) {
     appendElement(byId("main-calendar-mode"), "button", { "data-calendar-mode": mode });
@@ -405,6 +427,72 @@ async function flushAsyncWork() {
   await Promise.resolve();
 }
 
+let appImportCounter = 0;
+
+function appModuleUrl(label) {
+  appImportCounter += 1;
+  return new URL(`./app.js?${label}=${appImportCounter}`, import.meta.url);
+}
+
+function dateKeyAfter(days) {
+  const date = new Date();
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+function renderedMarkup(element) {
+  return [
+    element.innerHTML,
+    element.textContent,
+    ...element.children.map((child) => renderedMarkup(child)),
+  ].join("");
+}
+
+async function settleApp() {
+  for (let index = 0; index < 100; index += 1) {
+    await Promise.resolve();
+  }
+}
+
+async function exerciseAnonymousControls(document) {
+  const activeLineSelect = document.getElementById("active-line-select");
+  activeLineSelect.value = "B";
+  await activeLineSelect.dispatchEvent({ type: "change" });
+  await settleApp();
+
+  const calendarMode = document.querySelector('[data-calendar-mode="all"]');
+  await document.getElementById("main-calendar-mode").dispatchEvent({ type: "click", target: calendarMode });
+  const previewMode = document.querySelector('[data-preview-calendar-mode="scheduled"]');
+  await document.getElementById("preview-calendar-mode").dispatchEvent({ type: "click", target: previewMode });
+
+  await document.getElementById("preview-selected").dispatchEvent({ type: "click" });
+  assert.equal(document.getElementById("message-title").textContent, "請先選取訂單");
+  await document.getElementById("reject-selected").dispatchEvent({ type: "click" });
+  assert.equal(document.getElementById("message-title").textContent, "請先選取訂單");
+  await document.getElementById("cancel-selected").dispatchEvent({ type: "click" });
+  assert.equal(document.getElementById("message-title").textContent, "請先選取訂單");
+  await document.getElementById("schedule-form").dispatchEvent({ type: "submit" });
+  assert.equal(document.getElementById("message-title").textContent, "請先選取訂單");
+
+  await document.getElementById("cancel-production-report").dispatchEvent({ type: "click" });
+  await document.getElementById("confirm-reject-orders").dispatchEvent({ type: "click" });
+  assert.equal(document.getElementById("message-title").textContent, "請填寫駁回理由");
+
+  const actionsTab = document.querySelector('[data-mobile-view="actions"]');
+  await actionsTab.dispatchEvent({ type: "click" });
+  await document.getElementById("scheduler-panel-toggle").dispatchEvent({ type: "click" });
+  await document.getElementById("prev-month").dispatchEvent({ type: "click" });
+  await document.getElementById("next-month").dispatchEvent({ type: "click" });
+  await document.getElementById("today-month").dispatchEvent({ type: "click" });
+
+  await document.getElementById("create-conflict-demo").dispatchEvent({ type: "click" });
+  assert.equal(document.getElementById("message-title").textContent, "無法建立衝突資料");
+  await document.getElementById("create-hpa-peak").dispatchEvent({ type: "click" });
+  assert.equal(document.getElementById("message-title").textContent, "autoscaling 狀態讀取失敗");
+  await document.getElementById("clear-hpa-peak").dispatchEvent({ type: "click" });
+  assert.equal(document.getElementById("message-title").textContent, "清除失敗");
+}
+
 test("anonymous startup renders login state with fallback lines and initialized dates", async () => {
   const document = buildDomFromIndex();
   const restoreGlobals = installBrowserGlobals(document);
@@ -422,6 +510,8 @@ test("anonymous startup renders login state with fallback lines and initialized 
     assert.notEqual(document.querySelector('input[name="dueDate"]').value, "");
     assert.equal(document.querySelector('#order-form input[name="lineId"]').value, "A");
     assert.equal(document.querySelector('#schedule-form input[name="lineId"]').value, "A");
+
+    await exerciseAnonymousControls(document);
   } finally {
     restoreGlobals();
   }
@@ -430,15 +520,40 @@ test("anonymous startup renders login state with fallback lines and initialized 
 test("login saves session and logout clears storage and app state", async () => {
   const document = buildDomFromIndex();
   const calls = [];
+  let hpaCleared = false;
+  const hpaSummary = {
+    autoscaling: {
+      desiredReplicas: 3,
+      maxReplicas: 8,
+      currentReplicas: 2,
+      readyReplicas: 2,
+      deploymentReplicas: 2,
+      readyPods: 2,
+      podCount: 3,
+    },
+    grafanaPath: "/grafana/d/web",
+    metricName: "woms_web_nginx_requests_per_second_per_pod",
+    hpaName: "woms-web-hpa",
+    deploymentName: "woms-web",
+    reason: "traffic rising",
+  };
   const fetchImpl = async (path, options = {}) => {
     calls.push({ path, options });
     if (path === "/api/auth/login") {
       assert.equal(options.method, "POST");
-      assert.deepEqual(JSON.parse(options.body), { username: "sales", password: "demo" });
-      return jsonResponse({
-        token: "token-sales",
-        user: { username: "sales", role: "sales" },
-      });
+      const credentials = JSON.parse(options.body);
+      const users = {
+        sales: { token: "token-sales", user: { id: "user-sales", username: "sales", role: "sales" } },
+        scheduler: { token: "token-scheduler", user: { id: "scheduler-a", username: "scheduler", role: "scheduler", lineId: "A" } },
+        admin: { token: "token-admin", user: { id: "admin-a", username: "admin", role: "admin" } },
+      };
+      assert.equal(credentials.password, "demo");
+      return jsonResponse(users[credentials.username]);
+    }
+    if (path === "/api/auth/logout") {
+      assert.equal(options.method, "POST");
+      assert.match(options.headers.Authorization, /^Bearer token-/);
+      return jsonResponse({});
     }
     if (path === "/api/lines") {
       return jsonResponse({
@@ -449,15 +564,108 @@ test("login saves session and logout clears storage and app state", async () => 
       });
     }
     if (path === "/api/orders") {
-      return jsonResponse({ orders: [] });
+      const token = options.headers.Authorization;
+      if (token === "Bearer token-scheduler") {
+        return jsonResponse({
+          orders: [
+            { id: "ORD-PENDING", customer: "ACME", lineId: "A", quantity: 2500, priority: "high", status: "待排程", dueDate: dateKeyAfter(6), createdBy: "user-sales" },
+            { id: "ORD-SCHEDULED", customer: "Beta", lineId: "A", quantity: 1500, priority: "low", status: "已排程", dueDate: dateKeyAfter(8), createdBy: "user-sales" },
+            { id: "ORD-PROD", customer: "Gamma", lineId: "A", quantity: 900, priority: "low", status: "生產中", dueDate: dateKeyAfter(9), createdBy: "user-sales" },
+          ],
+        });
+      }
+      return jsonResponse({
+        orders: [
+          { id: "ORD-EXISTING", customer: "ACME", lineId: "A", quantity: 1200, priority: "low", status: "已排程", dueDate: dateKeyAfter(8), createdBy: "user-sales" },
+        ],
+      });
     }
     if (String(path).startsWith("/api/schedules/calendar?")) {
-      return jsonResponse({ allocations: [], pendingAllocations: [] });
+      const token = options.headers.Authorization;
+      if (token === "Bearer token-scheduler") {
+        return jsonResponse({
+          allocations: [
+            { orderId: "ORD-SCHEDULED", customer: "Beta", lineId: "A", date: dateKeyAfter(2), quantity: 1500, priority: "low", status: "已排程" },
+            { orderId: "ORD-PROD", customer: "Gamma", lineId: "A", date: dateKeyAfter(3), quantity: 900, priority: "low", status: "生產中" },
+          ],
+          pendingAllocations: [],
+        });
+      }
+      return jsonResponse({
+        allocations: [
+          { orderId: "ORD-EXISTING", customer: "ACME", lineId: "A", date: dateKeyAfter(4), quantity: 1200, priority: "low", status: "已排程" },
+        ],
+        pendingAllocations: [],
+      });
     }
-    if (path === "/api/auth/logout") {
+    if (String(path).startsWith("/api/schedules/history?")) {
+      return jsonResponse({ history: [{ action: "schedule.job.create", resource: "JOB-1", reason: "ok", createdAt: `${dateKeyAfter(0)}T01:02:00Z` }] });
+    }
+    if (path === "/api/schedules/preview") {
       assert.equal(options.method, "POST");
-      assert.equal(options.headers.Authorization, "Bearer token-sales");
-      return jsonResponse({});
+      const body = JSON.parse(options.body);
+      if (body.draftOrder) {
+        return jsonResponse({
+          previewId: "PREVIEW-DRAFT",
+          currentDate: dateKeyAfter(0),
+          allocations: [
+            { orderId: "ORD-DRAFT", customer: "ACME", lineId: "A", date: dateKeyAfter(3), quantity: 2500, priority: "low", status: "待排程" },
+          ],
+          conflicts: [],
+        });
+      }
+      assert.deepEqual(body.orderIds, ["ORD-PENDING"]);
+      return jsonResponse({
+        previewId: "PREVIEW-SCHEDULE",
+        currentDate: dateKeyAfter(0),
+        allocations: [
+          { orderId: "ORD-PENDING", customer: "ACME", lineId: "A", date: dateKeyAfter(2), quantity: 2500, priority: "high", status: "已排程" },
+          { orderId: "ORD-PENDING-1", sourceOrderId: "ORD-PENDING", customer: "ACME", lineId: "A", date: dateKeyAfter(6), quantity: 300, priority: "high", status: "已排程" },
+        ],
+        conflicts: [],
+      });
+    }
+    if (path === "/api/orders/preview-confirm") {
+      assert.equal(options.method, "POST");
+      return jsonResponse({ id: "ORD-DRAFT", customer: "ACME", lineId: "A", quantity: 2500, priority: "low", status: "待排程", dueDate: dateKeyAfter(5), createdBy: "user-sales" });
+    }
+    if (path === "/api/schedules/jobs") {
+      assert.equal(options.method, "POST");
+      assert.equal(JSON.parse(options.body).previewId, "PREVIEW-SCHEDULE");
+      return jsonResponse({ id: "JOB-2", status: "completed" });
+    }
+    if (path === "/api/production/confirm") {
+      assert.equal(options.method, "POST");
+      assert.deepEqual(JSON.parse(options.body), { orderId: "ORD-PROD", productionDate: dateKeyAfter(3), producedQuantity: 500 });
+      return jsonResponse({ remainder: { id: "ORD-PROD-R1", quantity: 400 } });
+    }
+    if (path === "/api/users") {
+      if (options.method === "POST") {
+        return jsonResponse({ username: "new-scheduler", role: "scheduler", lineId: "A" });
+      }
+      if (options.method === "PATCH") {
+        return jsonResponse({ username: "ops", role: "scheduler", lineId: "A" });
+      }
+      return jsonResponse({ users: [{ username: "ops", role: "sales" }] });
+    }
+    if (path === "/api/users/password") {
+      assert.equal(options.method, "PATCH");
+      return jsonResponse({ username: "ops" });
+    }
+    if (path === "/api/users/ops") {
+      assert.equal(options.method, "DELETE");
+      return jsonResponse({ username: "ops", deleted: false });
+    }
+    if (path === "/api/demo/hpa-peak") {
+      if (options.method === "POST") {
+        hpaCleared = false;
+        return jsonResponse({ summary: { ...hpaSummary, orderCount: 3 } });
+      }
+      if (options.method === "DELETE") {
+        hpaCleared = true;
+        return jsonResponse({ summary: null });
+      }
+      return jsonResponse({ summary: hpaCleared ? null : hpaSummary });
     }
     throw new Error(`unexpected fetch ${path}`);
   };
@@ -466,17 +674,28 @@ test("login saves session and logout clears storage and app state", async () => 
     await import(new URL(`./app.js?dp003=${Date.now()}`, import.meta.url));
 
     await document.getElementById("login-form").dispatchEvent({ type: "submit" });
+    await settleApp();
 
     assert.equal(calls[0].path, "/api/auth/login");
     assert.equal(localStorage.getItem("woms.token"), "token-sales");
-    assert.equal(localStorage.getItem("woms.user"), JSON.stringify({ username: "sales", role: "sales" }));
+    assert.equal(localStorage.getItem("woms.user"), JSON.stringify({ id: "user-sales", username: "sales", role: "sales" }));
     assert.equal(document.getElementById("login-page").hidden, true);
     assert.equal(document.getElementById("app-shell").hidden, false);
     assert.equal(document.body.dataset.role, "sales");
     assert.equal(document.getElementById("order-form").hidden, false);
     assert.equal(document.getElementById("session-greeting").textContent, "您好 sales");
 
+    document.querySelector('#order-form input[name="dueDate"]').value = dateKeyAfter(5);
+    await document.getElementById("order-form").dispatchEvent({ type: "submit" });
+    await settleApp();
+    assert.match(renderedMarkup(document.getElementById("preview-calendar-grid")), /ORD-DRAFT/);
+
+    await document.getElementById("confirm-preview-order").dispatchEvent({ type: "click" });
+    await settleApp();
+    assert.equal(document.getElementById("message-title").textContent, "已加入待排程");
+
     await document.getElementById("logout-button").dispatchEvent({ type: "click" });
+    await settleApp();
 
     assert.equal(calls.at(-1).path, "/api/auth/logout");
     assert.equal(localStorage.getItem("woms.token"), null);
@@ -484,6 +703,77 @@ test("login saves session and logout clears storage and app state", async () => 
     assert.equal(document.getElementById("login-page").hidden, false);
     assert.equal(document.getElementById("app-shell").hidden, true);
     assert.equal(document.body.dataset.role, "");
+
+    document.querySelector('#login-form input[name="username"]').value = "scheduler";
+    document.querySelector('#login-form input[name="password"]').value = "demo";
+    await document.getElementById("login-form").dispatchEvent({ type: "submit" });
+    await settleApp();
+    assert.equal(document.body.dataset.role, "scheduler");
+
+    const pendingCard = document.getElementById("orders-body").children.find((item) => item.dataset.orderId === "ORD-PENDING");
+    await pendingCard.dispatchEvent({ type: "click", target: pendingCard });
+    await document.getElementById("preview-selected").dispatchEvent({ type: "click" });
+    await settleApp();
+    assert.match(renderedMarkup(document.getElementById("preview-calendar-grid")), /child-order-preview/);
+
+    await document.getElementById("confirm-schedule-job").dispatchEvent({ type: "click" });
+    await settleApp();
+    assert.equal(document.getElementById("message-title").textContent, "排程完成");
+
+    const productionForm = document.getElementById("production-form");
+    productionForm.elements.orderId.value = "ORD-PROD";
+    productionForm.elements.productionDate.value = dateKeyAfter(3);
+    productionForm.elements.producedQuantity.value = "500";
+    await productionForm.dispatchEvent({ type: "submit" });
+    await settleApp();
+    assert.equal(document.getElementById("message-title").textContent, "生產回報完成");
+
+    await document.getElementById("logout-button").dispatchEvent({ type: "click" });
+    await settleApp();
+
+    document.querySelector('#login-form input[name="username"]').value = "admin";
+    document.querySelector('#login-form input[name="password"]').value = "demo";
+    await document.getElementById("login-form").dispatchEvent({ type: "submit" });
+    await settleApp();
+    assert.equal(document.body.dataset.role, "admin");
+    assert.match(document.getElementById("hpa-demo-summary").innerHTML, /woms_web_nginx_requests_per_second_per_pod/);
+
+    const createForm = document.getElementById("create-user-form");
+    createForm.elements.username.value = "new-scheduler";
+    createForm.elements.password.value = "secret";
+    createForm.elements.role.value = "scheduler";
+    createForm.elements.lineId.value = "A";
+    await createForm.dispatchEvent({ type: "submit" });
+    await settleApp();
+    assert.equal(document.getElementById("message-title").textContent, "帳號已建立");
+
+    const assignForm = document.getElementById("assign-user-form");
+    assignForm.elements.username.value = "ops";
+    assignForm.elements.role.value = "scheduler";
+    assignForm.elements.lineId.value = "A";
+    await assignForm.dispatchEvent({ type: "submit" });
+    await settleApp();
+    assert.equal(document.getElementById("message-title").textContent, "帳號已更新");
+
+    const resetForm = document.getElementById("reset-password-form");
+    resetForm.elements.username.value = "ops";
+    resetForm.elements.password.value = "new-secret";
+    await resetForm.dispatchEvent({ type: "submit" });
+    await settleApp();
+    assert.equal(document.getElementById("message-title").textContent, "密碼已重設");
+
+    document.getElementById("assign-username").value = "ops";
+    await document.getElementById("delete-user-button").dispatchEvent({ type: "click" });
+    await settleApp();
+    assert.equal(document.getElementById("message-title").textContent, "帳號已處理");
+
+    await document.getElementById("create-hpa-peak").dispatchEvent({ type: "click" });
+    await settleApp();
+    assert.equal(document.getElementById("message-title").textContent, "web autoscaling demo 已載入");
+
+    await document.getElementById("clear-hpa-peak").dispatchEvent({ type: "click" });
+    await settleApp();
+    assert.equal(document.getElementById("message-title").textContent, "舊版資料已清除");
   } finally {
     restoreGlobals();
   }
@@ -518,6 +808,417 @@ test("expired stored session is cleared and returns to login state", async () =>
     assert.equal(document.getElementById("message-title").textContent, "登入狀態已失效");
     assert.equal(document.getElementById("message-body").textContent, "session expired");
     assert.equal(document.getElementById("message-dialog").dataset.type, "warn");
+
+    await exerciseAnonymousControls(document);
+  } finally {
+    restoreGlobals();
+  }
+});
+
+test("sales order form previews valid drafts and rejects non-future due dates", async () => {
+  const document = buildDomFromIndex();
+  const calls = [];
+  const fetchImpl = async (path, options = {}) => {
+    calls.push({ path, options });
+    if (path === "/api/lines") {
+      return jsonResponse({
+        lines: [
+          { id: "A", name: "Line A", capacityPerDay: 10000, timezone: "Asia/Taipei" },
+          { id: "B", name: "Line B", capacityPerDay: 9000, timezone: "Asia/Taipei" },
+        ],
+      });
+    }
+    if (path === "/api/orders") {
+      return jsonResponse({
+        orders: [
+          { id: "ORD-EXISTING", customer: "ACME", lineId: "A", quantity: 1200, priority: "low", status: "已排程", dueDate: dateKeyAfter(8), createdBy: "user-sales" },
+        ],
+      });
+    }
+    if (String(path).startsWith("/api/schedules/calendar?")) {
+      return jsonResponse({
+        allocations: [
+          { orderId: "ORD-EXISTING", customer: "ACME", lineId: "A", date: dateKeyAfter(4), quantity: 1200, priority: "low", status: "已排程" },
+        ],
+        pendingAllocations: [],
+      });
+    }
+    if (path === "/api/schedules/preview") {
+      assert.equal(options.method, "POST");
+      const body = JSON.parse(options.body);
+      assert.equal(body.lineId, "A");
+      assert.equal(body.draftOrder.customer, "ACME");
+      assert.equal(body.draftOrder.quantity, 2500);
+      return jsonResponse({
+        previewId: "PREVIEW-DRAFT",
+        currentDate: dateKeyAfter(0),
+        allocations: [
+          { orderId: "ORD-DRAFT", customer: "ACME", lineId: "A", date: dateKeyAfter(3), quantity: 2500, priority: "low", status: "待排程" },
+        ],
+        conflicts: [],
+      });
+    }
+    if (path === "/api/orders/preview-confirm") {
+      assert.equal(options.method, "POST");
+      assert.deepEqual(JSON.parse(options.body), { previewId: "PREVIEW-DRAFT" });
+      return jsonResponse({ id: "ORD-DRAFT", customer: "ACME", lineId: "A", quantity: 2500, priority: "low", status: "待排程", dueDate: dateKeyAfter(5), createdBy: "user-sales" });
+    }
+    throw new Error(`unexpected fetch ${path}`);
+  };
+  const restoreGlobals = installBrowserGlobalsWithFetch(document, fetchImpl, {
+    "woms.token": "token-sales",
+    "woms.user": JSON.stringify({ id: "user-sales", username: "sales", role: "sales" }),
+  });
+  try {
+    await import(appModuleUrl("sales-draft-preview"));
+    await settleApp();
+
+    document.querySelector('#order-form input[name="dueDate"]').value = dateKeyAfter(5);
+    await document.getElementById("order-form").dispatchEvent({ type: "submit" });
+    await settleApp();
+
+    const previewCalls = calls.filter((call) => call.path === "/api/schedules/preview");
+    assert.equal(previewCalls.length, 1);
+    assert.equal(document.getElementById("schedule-preview-dialog").open, true);
+    assert.equal(document.getElementById("confirm-preview-order").hidden, false);
+    assert.equal(document.getElementById("confirm-schedule-job").hidden, true);
+    assert.equal(document.getElementById("preview-page-title").textContent, "訂單分配預覽");
+    assert.match(document.getElementById("preview-page-list").innerHTML, /ORD-DRAFT/);
+    assert.match(renderedMarkup(document.getElementById("preview-calendar-grid")), /ORD-DRAFT/);
+
+    await document.getElementById("confirm-preview-order").dispatchEvent({ type: "click" });
+    await settleApp();
+
+    assert.equal(calls.filter((call) => call.path === "/api/orders/preview-confirm").length, 1);
+    assert.equal(document.getElementById("schedule-preview-dialog").open, false);
+    assert.equal(document.getElementById("message-title").textContent, "已加入待排程");
+
+    document.querySelector('#order-form input[name="dueDate"]').value = "2000-01-01";
+    await document.getElementById("order-form").dispatchEvent({ type: "submit" });
+    await settleApp();
+
+    assert.equal(calls.filter((call) => call.path === "/api/schedules/preview").length, 1);
+    assert.equal(document.getElementById("message-title").textContent, "無法加入待排程");
+    assert.equal(document.getElementById("message-dialog").dataset.type, "warn");
+  } finally {
+    restoreGlobals();
+  }
+});
+
+test("scheduler workspace renders orders calendar history and previews selected orders", async () => {
+  const document = buildDomFromIndex();
+  const calls = [];
+  const fetchImpl = async (path, options = {}) => {
+    calls.push({ path, options });
+    if (path === "/api/lines") {
+      return jsonResponse({
+        lines: [
+          { id: "A", name: "Line A", capacityPerDay: 10000, timezone: "Asia/Taipei" },
+          { id: "B", name: "Line B", capacityPerDay: 9000, timezone: "Asia/Taipei" },
+        ],
+      });
+    }
+    if (path === "/api/orders") {
+      return jsonResponse({
+        orders: [
+          { id: "ORD-PENDING", customer: "ACME", lineId: "A", quantity: 2500, priority: "high", status: "待排程", dueDate: dateKeyAfter(6), createdBy: "user-sales" },
+          { id: "ORD-SCHEDULED", customer: "Beta", lineId: "A", quantity: 1500, priority: "low", status: "已排程", dueDate: dateKeyAfter(8), createdBy: "user-sales" },
+          { id: "ORD-PROD", customer: "Gamma", lineId: "A", quantity: 900, priority: "low", status: "生產中", dueDate: dateKeyAfter(9), createdBy: "user-sales" },
+          { id: "ORD-B", customer: "Other", lineId: "B", quantity: 500, priority: "low", status: "待排程", dueDate: dateKeyAfter(5), createdBy: "user-sales" },
+        ],
+      });
+    }
+    if (String(path).startsWith("/api/schedules/calendar?")) {
+      return jsonResponse({
+        allocations: [
+          { orderId: "ORD-SCHEDULED", customer: "Beta", lineId: "A", date: dateKeyAfter(2), quantity: 1500, priority: "low", status: "已排程" },
+          { orderId: "ORD-PROD", customer: "Gamma", lineId: "A", date: dateKeyAfter(3), quantity: 900, priority: "low", status: "生產中" },
+          { orderId: "ORD-DONE", customer: "Done", lineId: "A", date: dateKeyAfter(4), quantity: 700, completedQuantity: 650, priority: "low", status: "已完成" },
+        ],
+        pendingAllocations: [],
+      });
+    }
+    if (String(path).startsWith("/api/schedules/history?")) {
+      return jsonResponse({
+        history: [
+          { action: "schedule.job.create", resource: "JOB-1", reason: "ok", createdAt: `${dateKeyAfter(0)}T01:02:00Z` },
+          { action: "production.confirm.partial", resource: "ORD-PROD", reason: "partial", createdAt: `${dateKeyAfter(0)}T02:03:00Z` },
+        ],
+      });
+    }
+    if (path === "/api/schedules/preview") {
+      assert.equal(options.method, "POST");
+      const body = JSON.parse(options.body);
+      assert.deepEqual(body.orderIds, ["ORD-PENDING"]);
+      return jsonResponse({
+        previewId: "PREVIEW-SCHEDULE",
+        currentDate: dateKeyAfter(0),
+        allocations: [
+          { orderId: "ORD-PENDING", customer: "ACME", lineId: "A", date: dateKeyAfter(2), quantity: 2500, priority: "high", status: "已排程" },
+          { orderId: "ORD-SCHEDULED", customer: "Beta", lineId: "A", date: dateKeyAfter(5), quantity: 1500, priority: "low", status: "已排程" },
+          { orderId: "ORD-PENDING-1", sourceOrderId: "ORD-PENDING", customer: "ACME", lineId: "A", date: dateKeyAfter(6), quantity: 300, priority: "high", status: "已排程" },
+        ],
+        conflicts: [],
+      });
+    }
+    if (path === "/api/schedules/jobs") {
+      assert.equal(options.method, "POST");
+      assert.deepEqual(JSON.parse(options.body), {
+        lineId: "A",
+        startDate: dateKeyAfter(1),
+        currentDate: dateKeyAfter(0),
+        orderIds: ["ORD-PENDING"],
+        resolutionOrderIds: [],
+        manualForce: false,
+        allowLateCompletion: false,
+        reason: "",
+        previewId: "PREVIEW-SCHEDULE",
+      });
+      return jsonResponse({ id: "JOB-2", status: "completed" });
+    }
+    throw new Error(`unexpected fetch ${path}`);
+  };
+  const restoreGlobals = installBrowserGlobalsWithFetch(document, fetchImpl, {
+    "woms.token": "token-scheduler",
+    "woms.user": JSON.stringify({ id: "scheduler-a", username: "scheduler", role: "scheduler", lineId: "A" }),
+  });
+  try {
+    await import(appModuleUrl("scheduler-workspace"));
+    await settleApp();
+
+    assert.equal(document.body.dataset.role, "scheduler");
+    assert.equal(document.getElementById("active-line-select").disabled, true);
+    assert.equal(document.getElementById("orders-body").children.length, 3);
+    assert.equal(document.getElementById("calendar-grid").children.length, 42);
+    assert.match(renderedMarkup(document.getElementById("calendar-grid")), /ORD-SCHEDULED/);
+    assert.match(renderedMarkup(document.getElementById("schedule-history-list")), /排程成功/);
+    assert.equal(document.getElementById("selected-count").textContent, "已選取 0 張訂單");
+
+    const pendingCard = document.getElementById("orders-body").children.find((item) => item.dataset.orderId === "ORD-PENDING");
+    await pendingCard.dispatchEvent({ type: "click", target: pendingCard });
+    assert.equal(document.getElementById("selected-count").textContent, "已選取 1 張訂單");
+
+    await document.getElementById("preview-selected").dispatchEvent({ type: "click" });
+    await settleApp();
+
+    assert.equal(document.getElementById("schedule-preview-dialog").open, true);
+    assert.equal(document.getElementById("confirm-preview-order").hidden, true);
+    assert.equal(document.getElementById("confirm-schedule-job").hidden, false);
+    assert.match(document.getElementById("preview-page-list").innerHTML, /ORD-PENDING/);
+    assert.match(renderedMarkup(document.getElementById("preview-calendar-grid")), /child-order-preview/);
+    assert.match(renderedMarkup(document.getElementById("preview-calendar-grid")), /moved-preview/);
+    assert.match(renderedMarkup(document.getElementById("preview-calendar-grid")), /moved-from-preview/);
+
+    await document.getElementById("confirm-schedule-job").dispatchEvent({ type: "click" });
+    await settleApp();
+
+    assert.equal(calls.filter((call) => call.path === "/api/schedules/jobs").length, 1);
+    assert.equal(document.getElementById("schedule-preview-dialog").open, false);
+    assert.equal(document.getElementById("message-title").textContent, "排程完成");
+  } finally {
+    restoreGlobals();
+  }
+});
+
+test("admin user management and autoscaling controls submit expected API calls", async () => {
+  const document = buildDomFromIndex();
+  const calls = [];
+  let hpaCleared = false;
+  const summary = {
+    autoscaling: {
+      desiredReplicas: 3,
+      maxReplicas: 8,
+      currentReplicas: 2,
+      readyReplicas: 2,
+      deploymentReplicas: 2,
+      readyPods: 2,
+      podCount: 3,
+    },
+    grafanaPath: "/grafana/d/web",
+    metricName: "woms_web_nginx_requests_per_second_per_pod",
+    hpaName: "woms-web-hpa",
+    deploymentName: "woms-web",
+    loadCommand: "hey -z 5m -c 80 https://woms.example/",
+    watchCommand: "kubectl get hpa -n woms -w",
+    reason: "traffic rising",
+    failedMessages: ["pod pending"],
+  };
+  const fetchImpl = async (path, options = {}) => {
+    calls.push({ path, options });
+    if (path === "/api/lines") {
+      return jsonResponse({ lines: [{ id: "A", name: "Line A", capacityPerDay: 10000, timezone: "Asia/Taipei" }] });
+    }
+    if (path === "/api/orders") {
+      return jsonResponse({ orders: [] });
+    }
+    if (String(path).startsWith("/api/schedules/calendar?")) {
+      return jsonResponse({ allocations: [], pendingAllocations: [] });
+    }
+    if (path === "/api/users") {
+      if (options.method === "POST") {
+        assert.deepEqual(JSON.parse(options.body), { username: "new-scheduler", password: "secret", role: "scheduler", lineId: "A" });
+        return jsonResponse({ username: "new-scheduler", role: "scheduler", lineId: "A" });
+      }
+      if (options.method === "PATCH") {
+        assert.deepEqual(JSON.parse(options.body), { username: "ops", role: "scheduler", lineId: "A" });
+        return jsonResponse({ username: "ops", role: "scheduler", lineId: "A" });
+      }
+      return jsonResponse({ users: [{ username: "ops", role: "sales" }] });
+    }
+    if (path === "/api/users/password") {
+      assert.equal(options.method, "PATCH");
+      assert.deepEqual(JSON.parse(options.body), { username: "ops", password: "new-secret" });
+      return jsonResponse({ username: "ops" });
+    }
+    if (path === "/api/users/ops") {
+      assert.equal(options.method, "DELETE");
+      return jsonResponse({ username: "ops", deleted: false });
+    }
+    if (path === "/api/demo/hpa-peak") {
+      if (options.method === "POST") {
+        hpaCleared = false;
+        return jsonResponse({ summary: { ...summary, orderCount: 3 } });
+      }
+      if (options.method === "DELETE") {
+        hpaCleared = true;
+        return jsonResponse({ summary: null });
+      }
+      return jsonResponse({ summary: hpaCleared ? null : summary });
+    }
+    throw new Error(`unexpected fetch ${path}`);
+  };
+  const restoreGlobals = installBrowserGlobalsWithFetch(document, fetchImpl, {
+    "woms.token": "token-admin",
+    "woms.user": JSON.stringify({ id: "admin-a", username: "admin", role: "admin" }),
+  });
+  try {
+    await import(appModuleUrl("admin-workspace"));
+    await settleApp();
+
+    assert.equal(document.body.dataset.role, "admin");
+    assert.equal(document.getElementById("admin-panel").hidden, false);
+    assert.match(document.getElementById("assign-username").innerHTML, /ops/);
+    assert.match(document.getElementById("hpa-demo-summary").innerHTML, /woms_web_nginx_requests_per_second_per_pod/);
+
+    const createForm = document.getElementById("create-user-form");
+    createForm.elements.username.value = "new-scheduler";
+    createForm.elements.password.value = "secret";
+    createForm.elements.role.value = "scheduler";
+    createForm.elements.lineId.value = "A";
+    await createForm.dispatchEvent({ type: "submit" });
+    await settleApp();
+    assert.equal(document.getElementById("message-title").textContent, "帳號已建立");
+
+    const assignForm = document.getElementById("assign-user-form");
+    assignForm.elements.username.value = "ops";
+    assignForm.elements.role.value = "scheduler";
+    assignForm.elements.lineId.value = "A";
+    await assignForm.dispatchEvent({ type: "submit" });
+    await settleApp();
+    assert.equal(document.getElementById("message-title").textContent, "帳號已更新");
+
+    const resetForm = document.getElementById("reset-password-form");
+    resetForm.elements.username.value = "ops";
+    resetForm.elements.password.value = "new-secret";
+    await resetForm.dispatchEvent({ type: "submit" });
+    await settleApp();
+    assert.equal(document.getElementById("message-title").textContent, "密碼已重設");
+
+    document.getElementById("assign-username").value = "ops";
+    await document.getElementById("delete-user-button").dispatchEvent({ type: "click" });
+    await settleApp();
+    assert.equal(document.getElementById("message-title").textContent, "帳號已處理");
+
+    await document.getElementById("create-hpa-peak").dispatchEvent({ type: "click" });
+    await settleApp();
+    assert.equal(document.getElementById("message-title").textContent, "web autoscaling demo 已載入");
+    assert.match(document.getElementById("hpa-demo-summary").innerHTML, /HPA 目標/);
+
+    await document.getElementById("refresh-hpa-peak").dispatchEvent({ type: "click" });
+    await settleApp();
+    assert.equal(calls.some((call) => call.path === "/api/demo/hpa-peak" && !call.options.method), true);
+
+    await document.getElementById("clear-hpa-peak").dispatchEvent({ type: "click" });
+    await settleApp();
+    assert.equal(document.getElementById("message-title").textContent, "舊版資料已清除");
+    assert.equal(document.getElementById("hpa-demo-summary").textContent, "尚未載入 web autoscaling 狀態");
+  } finally {
+    restoreGlobals();
+  }
+});
+
+test("production report form validates order allocation quantities and submits confirmation", async () => {
+  const document = buildDomFromIndex();
+  const calls = [];
+  const productionDate = dateKeyAfter(2);
+  const fetchImpl = async (path, options = {}) => {
+    calls.push({ path, options });
+    if (path === "/api/lines") {
+      return jsonResponse({ lines: [{ id: "A", name: "Line A", capacityPerDay: 10000, timezone: "Asia/Taipei" }] });
+    }
+    if (path === "/api/orders") {
+      return jsonResponse({
+        orders: [
+          { id: "ORD-PROD", customer: "Gamma", lineId: "A", quantity: 900, priority: "low", status: "生產中", dueDate: dateKeyAfter(5), createdBy: "user-sales" },
+        ],
+      });
+    }
+    if (String(path).startsWith("/api/schedules/calendar?")) {
+      return jsonResponse({
+        allocations: [
+          { orderId: "ORD-PROD", customer: "Gamma", lineId: "A", date: productionDate, quantity: 900, priority: "low", status: "生產中" },
+        ],
+        pendingAllocations: [],
+      });
+    }
+    if (String(path).startsWith("/api/schedules/history?")) {
+      return jsonResponse({ history: [] });
+    }
+    if (path === "/api/production/confirm") {
+      assert.equal(options.method, "POST");
+      assert.deepEqual(JSON.parse(options.body), { orderId: "ORD-PROD", productionDate, producedQuantity: 500 });
+      return jsonResponse({ remainder: { id: "ORD-PROD-R1", quantity: 400 } });
+    }
+    throw new Error(`unexpected fetch ${path}`);
+  };
+  const restoreGlobals = installBrowserGlobalsWithFetch(document, fetchImpl, {
+    "woms.token": "token-scheduler",
+    "woms.user": JSON.stringify({ id: "scheduler-a", username: "scheduler", role: "scheduler", lineId: "A" }),
+  });
+  try {
+    await import(appModuleUrl("production-report"));
+    await settleApp();
+
+    const form = document.getElementById("production-form");
+
+    form.elements.orderId.value = "UNKNOWN";
+    form.elements.productionDate.value = productionDate;
+    form.elements.producedQuantity.value = "10";
+    await form.dispatchEvent({ type: "submit" });
+    assert.equal(document.getElementById("message-title").textContent, "找不到訂單");
+
+    form.elements.orderId.value = "ORD-PROD";
+    form.elements.productionDate.value = dateKeyAfter(9);
+    form.elements.producedQuantity.value = "10";
+    await form.dispatchEvent({ type: "submit" });
+    assert.equal(document.getElementById("message-title").textContent, "找不到排程");
+
+    form.elements.productionDate.value = productionDate;
+    form.elements.producedQuantity.value = "0";
+    await form.dispatchEvent({ type: "submit" });
+    assert.equal(document.getElementById("message-title").textContent, "片數不正確");
+
+    form.elements.producedQuantity.value = "901";
+    await form.dispatchEvent({ type: "submit" });
+    assert.equal(document.getElementById("message-title").textContent, "片數超過本日排程");
+
+    form.elements.producedQuantity.value = "500";
+    await form.dispatchEvent({ type: "submit" });
+    await settleApp();
+
+    assert.equal(calls.filter((call) => call.path === "/api/production/confirm").length, 1);
+    assert.equal(document.getElementById("message-title").textContent, "生產回報完成");
+    assert.match(document.getElementById("message-body").textContent, /ORD-PROD-R1/);
   } finally {
     restoreGlobals();
   }
