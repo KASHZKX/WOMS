@@ -2,13 +2,17 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
+	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/d11nn/woms/internal/domain"
 	womslock "github.com/d11nn/woms/internal/lock"
 	"github.com/segmentio/kafka-go"
@@ -142,6 +146,31 @@ func TestLoadWorkerConfigRejectsInvalidDurationsAndIntegers(t *testing.T) {
 			name: "invalid offset",
 			env:  map[string]string{"WORKER_START_OFFSET": "middle"},
 			want: "WORKER_START_OFFSET must be one of",
+		},
+		{
+			name: "malformed min job duration",
+			env:  map[string]string{"WORKER_MIN_JOB_DURATION_MS": "abc"},
+			want: "WORKER_MIN_JOB_DURATION_MS must be an integer number of milliseconds",
+		},
+		{
+			name: "malformed lock renew interval",
+			env:  map[string]string{"WORKER_LOCK_RENEW_INTERVAL_MS": "abc"},
+			want: "WORKER_LOCK_RENEW_INTERVAL_MS must be an integer number of milliseconds",
+		},
+		{
+			name: "malformed backfill interval",
+			env:  map[string]string{"WORKER_BACKFILL_INTERVAL_MS": "abc"},
+			want: "WORKER_BACKFILL_INTERVAL_MS must be an integer number of milliseconds",
+		},
+		{
+			name: "malformed dependency timeout",
+			env:  map[string]string{"WORKER_DEPENDENCY_RETRY_TIMEOUT_MS": "abc"},
+			want: "WORKER_DEPENDENCY_RETRY_TIMEOUT_MS must be an integer number of milliseconds",
+		},
+		{
+			name: "malformed dependency interval",
+			env:  map[string]string{"WORKER_DEPENDENCY_RETRY_INTERVAL_MS": "abc"},
+			want: "WORKER_DEPENDENCY_RETRY_INTERVAL_MS must be an integer number of milliseconds",
 		},
 	}
 	for _, tc := range cases {
@@ -547,3 +576,780 @@ func (s *fakeLockedJobStore) markCompleted(context.Context, domain.ScheduleJob) 
 	s.status = domain.JobCompleted
 	return nil
 }
+
+func TestContainsAndTruncateDate(t *testing.T) {
+	if !contains([]string{"a", "b", "c"}, "b") {
+		t.Error("contains failed")
+	}
+	if contains([]string{"a", "b", "c"}, "d") {
+		t.Error("contains should be false")
+	}
+	tm := time.Date(2026, 5, 30, 15, 30, 0, 0, time.UTC)
+	truncated := truncateDate(tm)
+	if truncated.Hour() != 0 || truncated.Minute() != 0 || truncated.Second() != 0 {
+		t.Errorf("truncateDate failed: %v", truncated)
+	}
+}
+
+func TestSqlLockedJobStore_JobStatus(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create sqlmock: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectBegin()
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	defer tx.Rollback()
+
+	store := sqlLockedJobStore{tx: tx}
+
+	// Case 1: Job found
+	mock.ExpectQuery("SELECT status FROM schedule_jobs WHERE id = \\$1 FOR UPDATE").
+		WithArgs("job-1").
+		WillReturnRows(sqlmock.NewRows([]string{"status"}).AddRow("queued"))
+
+	status, found, err := store.jobStatus(context.Background(), "job-1")
+	if err != nil || !found || status != domain.JobQueued {
+		t.Errorf("jobStatus failed: status=%v found=%v err=%v", status, found, err)
+	}
+
+	// Case 2: Job not found
+	mock.ExpectQuery("SELECT status FROM schedule_jobs WHERE id = \\$1 FOR UPDATE").
+		WithArgs("job-missing").
+		WillReturnError(sql.ErrNoRows)
+
+	status, found, err = store.jobStatus(context.Background(), "job-missing")
+	if err != nil || found {
+		t.Errorf("jobStatus expected not found: found=%v err=%v", found, err)
+	}
+
+	// Case 3: Error
+	mock.ExpectQuery("SELECT status FROM schedule_jobs").
+		WillReturnError(errors.New("db error"))
+	_, _, err = store.jobStatus(context.Background(), "job-err")
+	if err == nil {
+		t.Error("expected error")
+	}
+}
+
+func TestSqlLockedJobStore_MarkRunning(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create sqlmock: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectBegin()
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	defer tx.Rollback()
+
+	store := sqlLockedJobStore{tx: tx}
+
+	mock.ExpectQuery("UPDATE schedule_jobs SET status = 'running'").
+		WithArgs("job-1").
+		WillReturnRows(sqlmock.NewRows([]string{"attempt_count"}).AddRow(2))
+
+	attempt, err := store.markRunning(context.Background(), "job-1")
+	if err != nil || attempt != 2 {
+		t.Errorf("markRunning failed: attempt=%d err=%v", attempt, err)
+	}
+}
+
+func TestSqlLockedJobStore_MarkRetryAfterRun(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create sqlmock: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectBegin()
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	defer tx.Rollback()
+
+	store := sqlLockedJobStore{tx: tx}
+
+	mock.ExpectExec("UPDATE schedule_jobs SET status = 'queued'").
+		WithArgs("job-1", "some message").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	err = store.markRetryAfterRun(context.Background(), "job-1", "some message")
+	if err != nil {
+		t.Errorf("markRetryAfterRun failed: %v", err)
+	}
+}
+
+func TestSqlLockedJobStore_MarkFailedAfterRun(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create sqlmock: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectBegin()
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback()
+
+	store := sqlLockedJobStore{tx: tx}
+
+	mock.ExpectExec("UPDATE schedule_jobs SET status = 'failed'").
+		WithArgs("job-1", "message").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	// Mock insertWorkerAuditTx (note: using pattern matched string for query)
+	mock.ExpectExec("INSERT INTO audit_logs").
+		WithArgs("job-1", "schedule.job.fail", "reason").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	err = store.markFailedAfterRun(context.Background(), "job-1", "message", "reason")
+	if err != nil {
+		t.Errorf("markFailedAfterRun failed: %v", err)
+	}
+}
+
+func TestSqlLockedJobStore_MarkCompleted(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create sqlmock: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectBegin()
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback()
+
+	store := sqlLockedJobStore{tx: tx}
+
+	job := domain.ScheduleJob{
+		ID:        "job-1",
+		PreviewID: "preview-1",
+	}
+
+	mock.ExpectExec("UPDATE schedule_jobs SET status = 'completed'").
+		WithArgs("job-1").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	// Mock insertWorkerAuditTx
+	mock.ExpectExec("INSERT INTO audit_logs").
+		WithArgs("job-1", "schedule.job.complete", "排程任務已完成。").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	mock.ExpectExec("DELETE FROM schedule_previews WHERE id = \\$1").
+		WithArgs("preview-1").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	err = store.markCompleted(context.Background(), job)
+	if err != nil {
+		t.Errorf("markCompleted failed: %v", err)
+	}
+}
+
+func TestPersistLineSchedule(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create sqlmock: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectBegin()
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback()
+
+	// Query orders
+	mock.ExpectQuery("SELECT id, quantity, priority FROM orders").
+		WithArgs("A").
+		WillReturnRows(sqlmock.NewRows([]string{"id", "quantity", "priority"}).
+			AddRow("ORD-1", 500, "high").
+			AddRow("ORD-2", 600, "low"))
+
+	// Query line capacity & revision
+	mock.ExpectQuery("SELECT capacity_per_day, schedule_revision FROM production_lines").
+		WithArgs("A").
+		WillReturnRows(sqlmock.NewRows([]string{"capacity_per_day", "schedule_revision"}).
+			AddRow(1000, int64(10)))
+
+	// Expect allocations inserts
+	// For ORD-1: quantity 500 < capacity 1000, so scheduled on today
+	mock.ExpectExec("INSERT INTO schedule_allocations").
+		WithArgs("ORD-1", "A", sqlmock.AnyArg(), 500, "high").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("UPDATE orders SET status = '已排程'").
+		WithArgs("ORD-1").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	// For ORD-2: quantity 500+600 = 1100 > capacity 1000, so scheduled on next day
+	mock.ExpectExec("INSERT INTO schedule_allocations").
+		WithArgs("ORD-2", "A", sqlmock.AnyArg(), 600, "low").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("UPDATE orders SET status = '已排程'").
+		WithArgs("ORD-2").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	// Update production line revision
+	mock.ExpectExec("UPDATE production_lines SET schedule_revision = schedule_revision \\+ 1").
+		WithArgs("A").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	job := domain.ScheduleJob{
+		ID:           "job-1",
+		LineID:       "A",
+		LineRevision: 10,
+	}
+
+	err = persistLineSchedule(context.Background(), tx, job)
+	if err != nil {
+		t.Fatalf("persistLineSchedule failed: %v", err)
+	}
+
+	// Test stale line revision error
+	mock.ExpectQuery("SELECT id, quantity, priority FROM orders").
+		WithArgs("A").
+		WillReturnRows(sqlmock.NewRows([]string{"id", "quantity", "priority"}).AddRow("ORD-1", 500, "high"))
+
+	mock.ExpectQuery("SELECT capacity_per_day, schedule_revision FROM production_lines").
+		WithArgs("A").
+		WillReturnRows(sqlmock.NewRows([]string{"capacity_per_day", "schedule_revision"}).
+			AddRow(1000, int64(11))) // diff from job.LineRevision (10)
+
+	job.LineRevision = 10
+	err = persistLineSchedule(context.Background(), tx, job)
+	if _, ok := err.(errStaleScheduleData); !ok {
+		t.Errorf("expected errStaleScheduleData, got %v", err)
+	}
+}
+
+func TestPersistPreviewAllocations(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create sqlmock: %v", err)
+	}
+	defer db.Close()
+	mock.MatchExpectationsInOrder(false)
+
+	mock.ExpectBegin()
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback()
+
+	allocs := []map[string]any{
+		{
+			"orderId": "ORD-1-1",
+			"lineId": "A",
+			"date": "2026-05-30T00:00:00Z",
+			"quantity": 300,
+			"priority": "high",
+			"locked": false,
+			"sourceOrderId": "ORD-1",
+		},
+		{
+			"orderId": "ORD-1",
+			"lineId": "A",
+			"date": "2026-05-30T00:00:00Z",
+			"quantity": 200,
+			"priority": "high",
+			"locked": false,
+			"sourceOrderId": "",
+		},
+	}
+	allocsJSON, _ := json.Marshal(allocs)
+
+	mock.ExpectQuery("SELECT line_revision, allocations FROM schedule_previews").
+		WithArgs("preview-1", "A").
+		WillReturnRows(sqlmock.NewRows([]string{"line_revision", "allocations"}).
+			AddRow(int64(5), allocsJSON))
+
+	mock.ExpectQuery("SELECT schedule_revision FROM production_lines").
+		WithArgs("A").
+		WillReturnRows(sqlmock.NewRows([]string{"schedule_revision"}).AddRow(int64(5)))
+
+	// splitAllocations handling
+	mock.ExpectExec("UPDATE orders SET quantity = \\$2").
+		WithArgs("ORD-1", 200).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	mock.ExpectExec("INSERT INTO orders").
+		WithArgs("ORD-1-1", 300, "ORD-1").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	// delete old allocations
+	mock.ExpectExec("DELETE FROM schedule_allocations").
+		WithArgs("ORD-1-1").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("DELETE FROM schedule_allocations").
+		WithArgs("ORD-1").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	// insert new allocations
+	mock.ExpectExec("INSERT INTO schedule_allocations").
+		WithArgs("ORD-1-1", "A", sqlmock.AnyArg(), 300, "high", false).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("INSERT INTO schedule_allocations").
+		WithArgs("ORD-1", "A", sqlmock.AnyArg(), 200, "high", false).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	// update order status
+	mock.ExpectExec("UPDATE orders SET status = '已排程'").
+		WithArgs("ORD-1-1").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("UPDATE orders SET status = '已排程'").
+		WithArgs("ORD-1").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	// update production line revision
+	mock.ExpectExec("UPDATE production_lines SET schedule_revision = schedule_revision \\+ 1").
+		WithArgs("A").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	job := domain.ScheduleJob{
+		ID:           "job-1",
+		LineID:       "A",
+		PreviewID:    "preview-1",
+		LineRevision: 5,
+	}
+
+	err = persistPreviewAllocations(context.Background(), tx, job)
+	if err != nil {
+		t.Fatalf("persistPreviewAllocations failed: %v", err)
+	}
+}
+
+func TestBackfillQueuedJobs(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create sqlmock: %v", err)
+	}
+	defer db.Close()
+
+	// Mock backfillQueuedJobs queries
+	job := domain.ScheduleJob{
+		ID:     "job-1",
+		LineID: "A",
+	}
+	jobJSON, _ := json.Marshal(job)
+
+	// Since we run batch queries, first query returns rows
+	mock.ExpectQuery("SELECT id, line_id, COALESCE").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "line_id", "source", "preview_id", "request_hash", "line_revision", "order_ids", "created_at", "updated_at",
+		}).AddRow("job-1", "A", "", "", "", int64(0), jobJSON, time.Now(), time.Now()))
+
+	// Executed job needs to update status of the job in DB
+	// Inside processDBJob -> processJobLocked -> sqlLockedJobStore methods.
+	// But wait, processDBJob calls processJobPayload with sqlScheduleJobExecutor.
+	// That will do acquireLineLock. Since lockProvider is nil, it will call markJobFailed.
+	// Let's mock markJobFailed: UPDATE schedule_jobs SET status = 'failed'
+	mock.ExpectExec("UPDATE schedule_jobs SET status = 'failed'").
+		WithArgs("job-1", "Redis 排程鎖未設定。").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	// The query will loop until batchCount < batchSize (100).
+	// So second query should return 0 rows to terminate the loop.
+	mock.ExpectQuery("SELECT id, line_id, COALESCE").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "line_id", "source", "preview_id", "request_hash", "line_revision", "order_ids", "created_at", "updated_at",
+		}))
+
+	err = backfillQueuedJobs(context.Background(), db, nil, 3, time.Second, time.Second, time.Second)
+	if err != nil {
+		t.Fatalf("backfillQueuedJobs failed: %v", err)
+	}
+}
+
+func TestProcessDBJob(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create sqlmock: %v", err)
+	}
+	defer db.Close()
+
+	payload, _ := json.Marshal(domain.ScheduleJob{ID: "job-1", LineID: "A"})
+
+	mock.ExpectExec("UPDATE schedule_jobs SET status = 'failed'").
+		WithArgs("job-1", "Redis 排程鎖未設定。").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	err = processDBJob(context.Background(), db, nil, payload, 3, time.Second, time.Second, time.Second)
+	if err != nil {
+		t.Fatalf("processDBJob failed: %v", err)
+	}
+}
+
+func TestSqlScheduleJobExecutor_DelegatesAndDBLocked(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create sqlmock: %v", err)
+	}
+	defer db.Close()
+
+	executor := sqlScheduleJobExecutor{db: db}
+
+	// 1. Test markJobRetry
+	mock.ExpectExec("UPDATE schedule_jobs SET status = 'queued'").
+		WithArgs("job-1", "retry msg").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	err = executor.markJobRetry(context.Background(), "job-1", "retry msg")
+	if err != nil {
+		t.Errorf("markJobRetry delegate failed: %v", err)
+	}
+
+	// 2. Test processJobLocked / processDBJobLocked
+	mock.ExpectBegin()
+	// Inside runLockedJobState -> store.jobStatus: mock it
+	mock.ExpectQuery("SELECT status FROM schedule_jobs").
+		WithArgs("job-1").
+		WillReturnRows(sqlmock.NewRows([]string{"status"}).AddRow("queued"))
+	// markRunning
+	mock.ExpectQuery("UPDATE schedule_jobs SET status = 'running'").
+		WithArgs("job-1").
+		WillReturnRows(sqlmock.NewRows([]string{"attempt_count"}).AddRow(1))
+	// persist -> persistLineSchedule (since PreviewID is empty) -> QueryContext orders
+	mock.ExpectQuery("SELECT id, quantity, priority FROM orders").
+		WithArgs("A").
+		WillReturnRows(sqlmock.NewRows([]string{"id", "quantity", "priority"})) // empty orders to return nil fast
+	// markCompleted
+	mock.ExpectExec("UPDATE schedule_jobs SET status = 'completed'").
+		WithArgs("job-1").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("INSERT INTO audit_logs").
+		WithArgs("job-1", "schedule.job.complete", sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	mock.ExpectCommit()
+
+	job := domain.ScheduleJob{
+		ID:     "job-1",
+		LineID: "A",
+	}
+	err = executor.processJobLocked(context.Background(), job, 3)
+	if err != nil {
+		t.Errorf("processJobLocked delegate failed: %v", err)
+	}
+}
+
+func TestSqlLockedJobStore_PersistBranch(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create sqlmock: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectBegin()
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback()
+
+	store := sqlLockedJobStore{tx: tx}
+
+	// 1. job.Source == "hpa-peak-demo"
+	mock.ExpectQuery("SELECT id, quantity, priority FROM orders").
+		WithArgs("A").
+		WillReturnRows(sqlmock.NewRows([]string{"id", "quantity", "priority"}))
+
+	job1 := domain.ScheduleJob{
+		LineID: "A",
+		Source: "hpa-peak-demo",
+	}
+	err = store.persist(context.Background(), job1)
+	if err != nil {
+		t.Errorf("persist hpa-peak-demo failed: %v", err)
+	}
+
+	// 2. job.PreviewID != ""
+	// Query schedule_previews: return stale schedule data error to keep it simple and terminate fast
+	mock.ExpectQuery("SELECT line_revision, allocations FROM schedule_previews").
+		WithArgs("preview-1", "A").
+		WillReturnError(sql.ErrNoRows)
+
+	job2 := domain.ScheduleJob{
+		LineID:    "A",
+		PreviewID: "preview-1",
+	}
+	err = store.persist(context.Background(), job2)
+	if _, ok := err.(errStaleScheduleData); !ok {
+		t.Errorf("expected errStaleScheduleData, got %v", err)
+	}
+}
+
+func TestMainExitsOnInvalidConfig(t *testing.T) {
+	if os.Getenv("BE_CRASHY_WORKER") == "1" {
+		t.Setenv("WORKER_START_OFFSET", "invalid_offset")
+		main()
+		return
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=TestMainExitsOnInvalidConfig")
+	cmd.Env = append(os.Environ(), "BE_CRASHY_WORKER=1")
+	err := cmd.Run()
+	if err == nil {
+		t.Fatalf("expected command to exit with error")
+	}
+}
+
+func TestMainExitsOnInvalidRedisLockConfig(t *testing.T) {
+	if os.Getenv("BE_CRASHY_WORKER") == "2" {
+		t.Setenv("DATABASE_URL", "postgres://example")
+		t.Setenv("WORKER_LOCK_TTL_MS", "0") // invalid lock config (<=0)
+		main()
+		return
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=TestMainExitsOnInvalidRedisLockConfig")
+	cmd.Env = append(os.Environ(), "BE_CRASHY_WORKER=2")
+	err := cmd.Run()
+	if err == nil {
+		t.Fatalf("expected command to exit with error")
+	}
+}
+
+func TestMainExitsOnInvalidBackfillInterval(t *testing.T) {
+	if os.Getenv("BE_CRASHY_WORKER") == "3" {
+		t.Setenv("DATABASE_URL", "postgres://example")
+		t.Setenv("WORKER_BACKFILL_INTERVAL_MS", "0")
+		main()
+		return
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=TestMainExitsOnInvalidBackfillInterval")
+	cmd.Env = append(os.Environ(), "BE_CRASHY_WORKER=3")
+	err := cmd.Run()
+	if err == nil {
+		t.Fatalf("expected command to exit with error")
+	}
+}
+
+func TestMainExitsOnMissingRedisAddr(t *testing.T) {
+	if os.Getenv("BE_CRASHY_WORKER") == "4" {
+		t.Setenv("DATABASE_URL", "postgres://example")
+		t.Setenv("WORKER_BACKFILL_INTERVAL_MS", "5000")
+		t.Setenv("REDIS_ADDR", "")
+		main()
+		return
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=TestMainExitsOnMissingRedisAddr")
+	cmd.Env = append(os.Environ(), "BE_CRASHY_WORKER=4")
+	err := cmd.Run()
+	if err == nil {
+		t.Fatalf("expected command to exit with error")
+	}
+}
+
+func TestMainExitsOnRedisLockPingFailure(t *testing.T) {
+	if os.Getenv("BE_CRASHY_WORKER") == "5" {
+		t.Setenv("DATABASE_URL", "postgres://example")
+		t.Setenv("WORKER_BACKFILL_INTERVAL_MS", "5000")
+		t.Setenv("REDIS_ADDR", "127.0.0.1:9999") // invalid redis addr to cause timeout
+		t.Setenv("WORKER_DEPENDENCY_RETRY_TIMEOUT_MS", "1")
+		t.Setenv("WORKER_DEPENDENCY_RETRY_INTERVAL_MS", "1")
+		main()
+		return
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=TestMainExitsOnRedisLockPingFailure")
+	cmd.Env = append(os.Environ(), "BE_CRASHY_WORKER=5")
+	err := cmd.Run()
+	if err == nil {
+		t.Fatalf("expected command to exit with error")
+	}
+}
+
+func TestAllErrorPaths(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create sqlmock: %v", err)
+	}
+	defer db.Close()
+	mock.MatchExpectationsInOrder(false)
+
+	// 1. processDBJobLocked BeginTx failure
+	mock.ExpectBegin().WillReturnError(errors.New("begin error"))
+	err = processDBJobLocked(context.Background(), db, domain.ScheduleJob{ID: "job-1"}, 3)
+	if err == nil || err.Error() != "begin error" {
+		t.Errorf("expected begin error, got %v", err)
+	}
+
+	// 2. processDBJobLocked Commit failure
+	mock.ExpectBegin()
+	// mock runLockedJobState: status cancelled so it returns nil, true (shouldCommit = true)
+	mock.ExpectQuery("SELECT status FROM schedule_jobs").
+		WithArgs("job-1").
+		WillReturnRows(sqlmock.NewRows([]string{"status"}).AddRow("cancelled"))
+	mock.ExpectCommit().WillReturnError(errors.New("commit error"))
+	err = processDBJobLocked(context.Background(), db, domain.ScheduleJob{ID: "job-1"}, 3)
+	if err == nil || err.Error() != "commit error" {
+		t.Errorf("expected commit error, got %v", err)
+	}
+
+	mock.ExpectBegin()
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback()
+
+	store := sqlLockedJobStore{tx: tx}
+
+	// 3. markFailedAfterRun ExecContext failure
+	mock.ExpectExec("UPDATE schedule_jobs SET status = 'failed'").
+		WillReturnError(errors.New("exec error"))
+	err = store.markFailedAfterRun(context.Background(), "job-1", "message", "reason")
+	if err == nil || err.Error() != "exec error" {
+		t.Errorf("expected exec error, got %v", err)
+	}
+
+	// 4. markCompleted UPDATE failure
+	mock.ExpectExec("UPDATE schedule_jobs SET status = 'completed'").
+		WillReturnError(errors.New("update error"))
+	err = store.markCompleted(context.Background(), domain.ScheduleJob{ID: "job-1"})
+	if err == nil || err.Error() != "update error" {
+		t.Errorf("expected update error, got %v", err)
+	}
+
+	// 5. markCompleted audit log failure
+	mock.ExpectExec("UPDATE schedule_jobs SET status = 'completed'").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("INSERT INTO audit_logs").
+		WillReturnError(errors.New("audit error"))
+	err = store.markCompleted(context.Background(), domain.ScheduleJob{ID: "job-1"})
+	if err == nil || err.Error() != "audit error" {
+		t.Errorf("expected audit error, got %v", err)
+	}
+
+	// 6. markCompleted DELETE schedule_previews failure
+	mock.ExpectExec("UPDATE schedule_jobs SET status = 'completed'").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("INSERT INTO audit_logs").
+		WithArgs("job-1", "schedule.job.complete", sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("DELETE FROM schedule_previews WHERE id = \\$1").
+		WillReturnError(errors.New("delete error"))
+	err = store.markCompleted(context.Background(), domain.ScheduleJob{ID: "job-1", PreviewID: "preview-1"})
+	if err == nil || err.Error() != "delete error" {
+		t.Errorf("expected delete error, got %v", err)
+	}
+
+	// 7. persistPreviewAllocations other query error
+	mock.ExpectQuery("SELECT line_revision, allocations FROM schedule_previews").
+		WillReturnError(errors.New("previews error"))
+	err = persistPreviewAllocations(context.Background(), tx, domain.ScheduleJob{ID: "job-1", PreviewID: "preview-1", LineID: "A"})
+	if err == nil || err.Error() != "previews error" {
+		t.Errorf("expected previews error, got %v", err)
+	}
+
+	// 8. persistPreviewAllocations production line query error
+	mock.ExpectQuery("SELECT line_revision, allocations FROM schedule_previews").
+		WillReturnRows(sqlmock.NewRows([]string{"line_revision", "allocations"}).AddRow(int64(5), []byte(`[]`)))
+	mock.ExpectQuery("SELECT schedule_revision FROM production_lines").
+		WillReturnError(errors.New("revision error"))
+	err = persistPreviewAllocations(context.Background(), tx, domain.ScheduleJob{ID: "job-1", PreviewID: "preview-1", LineID: "A"})
+	if err == nil || err.Error() != "revision error" {
+		t.Errorf("expected revision error, got %v", err)
+	}
+
+	// 9. persistPreviewAllocations json.Unmarshal error
+	mock.ExpectQuery("SELECT line_revision, allocations FROM schedule_previews").
+		WillReturnRows(sqlmock.NewRows([]string{"line_revision", "allocations"}).AddRow(int64(5), []byte(`invalid json`)))
+	mock.ExpectQuery("SELECT schedule_revision FROM production_lines").
+		WillReturnRows(sqlmock.NewRows([]string{"schedule_revision"}).AddRow(int64(5)))
+	err = persistPreviewAllocations(context.Background(), tx, domain.ScheduleJob{ID: "job-1", PreviewID: "preview-1", LineID: "A", LineRevision: 5})
+	if err == nil || !strings.Contains(err.Error(), "invalid character") {
+		t.Errorf("expected json unmarshal error, got %v", err)
+	}
+
+	// 10. persistPreviewAllocations line ID mismatch
+	mismatchAllocs := []map[string]any{{"orderId": "ORD-1", "lineId": "B"}} // different line from "A"
+	mismatchJSON, _ := json.Marshal(mismatchAllocs)
+	mock.ExpectQuery("SELECT line_revision, allocations FROM schedule_previews").
+		WillReturnRows(sqlmock.NewRows([]string{"line_revision", "allocations"}).AddRow(int64(5), mismatchJSON))
+	mock.ExpectQuery("SELECT schedule_revision FROM production_lines").
+		WillReturnRows(sqlmock.NewRows([]string{"schedule_revision"}).AddRow(int64(5)))
+	err = persistPreviewAllocations(context.Background(), tx, domain.ScheduleJob{ID: "job-1", PreviewID: "preview-1", LineID: "A", LineRevision: 5})
+	if _, ok := err.(errStaleScheduleData); !ok {
+		t.Errorf("expected errStaleScheduleData on line mismatch, got %v", err)
+	}
+
+	// 11. persistLineSchedule query orders error
+	mock.ExpectQuery("SELECT id, quantity, priority FROM orders").
+		WillReturnError(errors.New("orders error"))
+	err = persistLineSchedule(context.Background(), tx, domain.ScheduleJob{LineID: "A"})
+	if err == nil || err.Error() != "orders error" {
+		t.Errorf("expected orders error, got %v", err)
+	}
+
+	// 12. persistLineSchedule query production lines error
+	mock.ExpectQuery("SELECT id, quantity, priority FROM orders").
+		WithArgs("A").
+		WillReturnRows(sqlmock.NewRows([]string{"id", "quantity", "priority"}).AddRow("ORD-1", 500, "high"))
+	mock.ExpectQuery("SELECT capacity_per_day, schedule_revision FROM production_lines").
+		WithArgs("A").
+		WillReturnError(errors.New("lines error"))
+	err = persistLineSchedule(context.Background(), tx, domain.ScheduleJob{LineID: "A"})
+	if err == nil || err.Error() != "lines error" {
+		t.Errorf("expected lines error, got %v", err)
+	}
+
+	// 13. backfillQueuedJobs db query error
+	mock.ExpectQuery("SELECT id, line_id, COALESCE").
+		WillReturnError(errors.New("query error"))
+	err = backfillQueuedJobs(context.Background(), db, nil, 3, time.Second, time.Second, time.Second)
+	if err == nil || err.Error() != "query error" {
+		t.Errorf("expected backfill query error, got %v", err)
+	}
+
+	// 14. backfillQueuedJobs rows Scan error
+	mock.ExpectQuery("SELECT id, line_id, COALESCE").
+		WillReturnRows(sqlmock.NewRows([]string{"id", "line_id"}).AddRow("job-1", nil))
+	err = backfillQueuedJobs(context.Background(), db, nil, 3, time.Second, time.Second, time.Second)
+	if err == nil {
+		t.Error("expected scan error")
+	}
+}
+
+type errorJobExecutor struct {
+	fakeJobExecutor
+	err error
+}
+
+func (e *errorJobExecutor) markJobFailed(ctx context.Context, jobID, message string) error {
+	return e.err
+}
+
+func (e *errorJobExecutor) markJobRetry(ctx context.Context, jobID, message string) error {
+	return e.err
+}
+
+func TestProcessJobPayloadErrorPropagation(t *testing.T) {
+	// 1. markJobFailed error propagation when lockProvider is nil
+	executor := errorJobExecutor{err: errors.New("failed to mark failed")}
+	payload := mustMarshalJob(t, domain.ScheduleJob{ID: "JOB-1", LineID: "A"})
+	err := processJobPayload(context.Background(), &executor, nil, payload, 3, time.Second, 0, time.Second)
+	if err == nil || err.Error() != "failed to mark failed" {
+		t.Errorf("expected error, got %v", err)
+	}
+
+	// 2. markJobRetry error propagation when lock acquisition times out
+	provider := &retryLockProvider{failures: 100}
+	err = processJobPayload(context.Background(), &executor, provider, payload, 3, time.Second, 0, time.Nanosecond)
+	if err == nil || err.Error() != "failed to mark failed" {
+		t.Errorf("expected error, got %v", err)
+	}
+}
+
