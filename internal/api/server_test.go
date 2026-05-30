@@ -506,6 +506,49 @@ func TestHPAPeakDemoPostDoesNotPublishScheduleJobs(t *testing.T) {
 	}
 }
 
+func TestMemoryStoreHPAPeakDemoCreatesSortableJobsAndClearSummary(t *testing.T) {
+	store := NewMemoryStore()
+	claims := auth.Claims{Subject: "user-admin", Role: domain.RoleAdmin}
+
+	summary, err := store.CreateHPAPeakDemo(claims)
+	if err != nil {
+		t.Fatalf("create hpa peak demo: %v", err)
+	}
+	if summary.LineCount != hpaDemoLastLine || summary.OrderCount != hpaDemoLastLine*hpaDemoOrdersPerLine {
+		t.Fatalf("unexpected hpa demo workload summary: %+v", summary)
+	}
+	if summary.JobCount != hpaDemoLastLine*hpaDemoJobsPerLine || summary.Statuses[string(domain.JobQueued)] != hpaDemoLastLine*hpaDemoJobsPerLine {
+		t.Fatalf("unexpected hpa demo job summary: %+v", summary)
+	}
+	if len(summary.RecentJobs) != 10 || summary.RecentJobs[0].ID != "HPA-JOB-L001-001" {
+		t.Fatalf("expected sorted recent HPA jobs, got %+v", summary.RecentJobs)
+	}
+
+	jobs := store.HPAPeakJobs()
+	if len(jobs) != hpaDemoLastLine*hpaDemoJobsPerLine {
+		t.Fatalf("expected all HPA jobs, got %d", len(jobs))
+	}
+	if jobs[0].ID != "HPA-JOB-L001-001" || jobs[len(jobs)-1].ID != "HPA-JOB-L200-002" {
+		t.Fatalf("expected sorted HPA job list, first=%+v last=%+v", jobs[0], jobs[len(jobs)-1])
+	}
+
+	cleared, err := store.ClearHPAPeakDemo(claims)
+	if err != nil {
+		t.Fatalf("clear hpa peak demo: %v", err)
+	}
+	if cleared.LineCount != 0 || cleared.OrderCount != 0 || cleared.Statuses[string(domain.JobCancelled)] != hpaDemoLastLine*hpaDemoJobsPerLine {
+		t.Fatalf("expected queued demo jobs to be cancelled and lines/orders cleared, got %+v", cleared)
+	}
+
+	reset, err := store.CreateHPAPeakDemo(claims)
+	if err != nil {
+		t.Fatalf("recreate hpa peak demo after clear: %v", err)
+	}
+	if reset.Statuses[string(domain.JobCancelled)] != 0 || reset.Statuses[string(domain.JobQueued)] != hpaDemoLastLine*hpaDemoJobsPerLine {
+		t.Fatalf("reset should remove cancelled demo jobs before recreating, got %+v", reset.Statuses)
+	}
+}
+
 func TestPublishHPAPeakJobsPublishesInOrderAndStopsOnFailure(t *testing.T) {
 	server := NewServerWithPublisher("secret", NewMemoryStore(), &recordingPublisher{})
 	jobs := []domain.ScheduleJob{
@@ -535,6 +578,25 @@ func TestKubernetesAutoscalingStateAndGetJSONEdges(t *testing.T) {
 	if state := loadHPAAutoscalingState("woms", "hpa", "deploy"); state != nil {
 		t.Fatalf("expected no in-cluster state without Kubernetes env, got %+v", state)
 	}
+
+	t.Setenv("KUBERNETES_SERVICE_HOST", "127.0.0.1")
+	hpaAutoscalingCache.Lock()
+	hpaAutoscalingCache.key = strings.Join([]string{"127.0.0.1", "woms", "hpa", "deploy", "app.kubernetes.io/component=web"}, "\x00")
+	hpaAutoscalingCache.expires = time.Now().Add(time.Minute)
+	hpaAutoscalingCache.state = &hpaAutoscalingState{CurrentReplicas: 3, ReadyPods: 2}
+	hpaAutoscalingCache.Unlock()
+	if state := loadHPAAutoscalingState("woms", "hpa", "deploy"); state == nil || state.CurrentReplicas != 3 || state.ReadyPods != 2 {
+		t.Fatalf("expected cached autoscaling state, got %+v", state)
+	}
+	hpaAutoscalingCache.Lock()
+	hpaAutoscalingCache.key = ""
+	hpaAutoscalingCache.expires = time.Time{}
+	hpaAutoscalingCache.state = nil
+	hpaAutoscalingCache.Unlock()
+	if state := loadHPAAutoscalingState("woms", "hpa", "deploy"); state == nil || !strings.Contains(state.Error, "service account token") {
+		t.Fatalf("expected service account token read error, got %+v", state)
+	}
+	t.Setenv("KUBERNETES_SERVICE_HOST", "")
 
 	server := newAPITestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "Bearer token" {
@@ -566,6 +628,229 @@ func TestKubernetesAutoscalingStateAndGetJSONEdges(t *testing.T) {
 	}
 	if err := kubernetesGetJSON(context.Background(), server.Client(), server.URL, "token", "/bad-json", &payload); err == nil {
 		t.Fatal("expected invalid JSON error")
+	}
+}
+
+func TestAPIHandlerErrorBranches(t *testing.T) {
+	server := NewServerWithPublisherAndConfig("secret", NewMemoryStore(), NoopScheduleJobPublisher{}, ServerConfig{
+		TokenSessions: failingSaveTokenSessionStore{},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(`{"username":"sales","password":"demo"}`))
+	res := httptest.NewRecorder()
+	server.ServeHTTP(res, req)
+	if res.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected login session save failure, got %d %s", res.Code, res.Body.String())
+	}
+
+	server = NewServer("secret", NewMemoryStore())
+	for _, tt := range []struct {
+		name    string
+		method  string
+		path    string
+		body    string
+		want    int
+		handler func(http.ResponseWriter, *http.Request)
+		claims  auth.Claims
+	}{
+		{
+			name: "orders method not allowed", method: http.MethodPut, path: "/api/orders", want: http.StatusMethodNotAllowed,
+			handler: server.handleOrders, claims: auth.Claims{Subject: "user-sales", Role: domain.RoleSales},
+		},
+		{
+			name: "orders post forbidden", method: http.MethodPost, path: "/api/orders", body: `{}`, want: http.StatusForbidden,
+			handler: server.handleOrders, claims: auth.Claims{Subject: "user-scheduler-a", Role: domain.RoleScheduler, LineID: "A"},
+		},
+		{
+			name: "orders post bad json", method: http.MethodPost, path: "/api/orders", body: `{`, want: http.StatusBadRequest,
+			handler: server.handleOrders, claims: auth.Claims{Subject: "user-sales", Role: domain.RoleSales},
+		},
+		{
+			name: "confirm preview forbidden", method: http.MethodPost, path: "/api/orders/preview-confirm", body: `{}`, want: http.StatusForbidden,
+			handler: server.handleConfirmPreviewOrder, claims: auth.Claims{Subject: "user-scheduler-a", Role: domain.RoleScheduler, LineID: "A"},
+		},
+		{
+			name: "confirm preview bad json", method: http.MethodPost, path: "/api/orders/preview-confirm", body: `{`, want: http.StatusBadRequest,
+			handler: server.handleConfirmPreviewOrder, claims: auth.Claims{Subject: "user-sales", Role: domain.RoleSales},
+		},
+		{
+			name: "reject orders forbidden", method: http.MethodPost, path: "/api/orders/reject", body: `{}`, want: http.StatusForbidden,
+			handler: server.handleRejectOrders, claims: auth.Claims{Subject: "user-sales", Role: domain.RoleSales},
+		},
+		{
+			name: "reject orders bad json", method: http.MethodPost, path: "/api/orders/reject", body: `{`, want: http.StatusBadRequest,
+			handler: server.handleRejectOrders, claims: auth.Claims{Subject: "user-scheduler-a", Role: domain.RoleScheduler, LineID: "A"},
+		},
+		{
+			name: "resubmit forbidden", method: http.MethodPost, path: "/api/orders/resubmit", body: `{}`, want: http.StatusForbidden,
+			handler: server.handleResubmitOrder, claims: auth.Claims{Subject: "user-scheduler-a", Role: domain.RoleScheduler, LineID: "A"},
+		},
+		{
+			name: "users method not allowed", method: http.MethodDelete, path: "/api/users", want: http.StatusMethodNotAllowed,
+			handler: server.handleUsers, claims: auth.Claims{Subject: "user-admin", Role: domain.RoleAdmin},
+		},
+		{
+			name: "users post bad json", method: http.MethodPost, path: "/api/users", body: `{`, want: http.StatusBadRequest,
+			handler: server.handleUsers, claims: auth.Claims{Subject: "user-admin", Role: domain.RoleAdmin},
+		},
+		{
+			name: "reset password forbidden", method: http.MethodPatch, path: "/api/users/password", body: `{}`, want: http.StatusForbidden,
+			handler: server.handleResetUserPassword, claims: auth.Claims{Subject: "user-sales", Role: domain.RoleSales},
+		},
+		{
+			name: "demo conflict bad json", method: http.MethodPost, path: "/api/demo/conflict-orders", body: `{`, want: http.StatusBadRequest,
+			handler: server.handleDemoConflictOrders, claims: auth.Claims{Subject: "user-admin", Role: domain.RoleAdmin},
+		},
+		{
+			name: "schedule preview bad json", method: http.MethodPost, path: "/api/schedules/preview", body: `{`, want: http.StatusBadRequest,
+			handler: server.handleSchedulePreview, claims: auth.Claims{Subject: "user-scheduler-a", Role: domain.RoleScheduler, LineID: "A"},
+		},
+		{
+			name: "hpa method not allowed", method: http.MethodPatch, path: "/api/demo/hpa-peak", want: http.StatusMethodNotAllowed,
+			handler: server.handleHPAPeakDemo, claims: auth.Claims{Subject: "user-admin", Role: domain.RoleAdmin},
+		},
+		{
+			name: "schedule jobs bad json", method: http.MethodPost, path: "/api/schedules/jobs", body: `{`, want: http.StatusBadRequest,
+			handler: server.handleScheduleJobs, claims: auth.Claims{Subject: "user-scheduler-a", Role: domain.RoleScheduler, LineID: "A"},
+		},
+		{
+			name: "production start forbidden", method: http.MethodPost, path: "/api/production/start", body: `{}`, want: http.StatusForbidden,
+			handler: server.handleProductionStart, claims: auth.Claims{Subject: "user-sales", Role: domain.RoleSales},
+		},
+		{
+			name: "production confirm bad json", method: http.MethodPost, path: "/api/production/confirm", body: `{`, want: http.StatusBadRequest,
+			handler: server.handleProductionConfirm, claims: auth.Claims{Subject: "user-scheduler-a", Role: domain.RoleScheduler, LineID: "A"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
+			req = req.WithContext(context.WithValue(req.Context(), claimsContextKey{}, tt.claims))
+			res := httptest.NewRecorder()
+			tt.handler(res, req)
+			if res.Code != tt.want {
+				t.Fatalf("expected %d, got %d body=%s", tt.want, res.Code, res.Body.String())
+			}
+		})
+	}
+
+	for _, tt := range []struct {
+		name    string
+		method  string
+		path    string
+		handler func(http.ResponseWriter, *http.Request)
+	}{
+		{"orders unauthorized", http.MethodGet, "/api/orders", server.handleOrders},
+		{"lines unauthorized", http.MethodGet, "/api/lines", server.handleLines},
+		{"confirm preview unauthorized", http.MethodPost, "/api/orders/preview-confirm", server.handleConfirmPreviewOrder},
+		{"reject unauthorized", http.MethodPost, "/api/orders/reject", server.handleRejectOrders},
+		{"resubmit unauthorized", http.MethodPost, "/api/orders/resubmit", server.handleResubmitOrder},
+		{"users unauthorized", http.MethodGet, "/api/users", server.handleUsers},
+		{"reset password unauthorized", http.MethodPatch, "/api/users/password", server.handleResetUserPassword},
+		{"demo conflict unauthorized", http.MethodPost, "/api/demo/conflict-orders", server.handleDemoConflictOrders},
+		{"schedule preview unauthorized", http.MethodPost, "/api/schedules/preview", server.handleSchedulePreview},
+		{"hpa unauthorized", http.MethodGet, "/api/demo/hpa-peak", server.handleHPAPeakDemo},
+		{"calendar unauthorized", http.MethodGet, "/api/schedules/calendar", server.handleScheduleCalendar},
+		{"history unauthorized", http.MethodGet, "/api/schedules/history", server.handleScheduleHistory},
+		{"jobs unauthorized", http.MethodPost, "/api/schedules/jobs", server.handleScheduleJobs},
+		{"get job unauthorized", http.MethodGet, "/api/schedules/jobs/JOB-1", server.handleGetScheduleJob},
+		{"production start unauthorized", http.MethodPost, "/api/production/start", server.handleProductionStart},
+		{"production confirm unauthorized", http.MethodPost, "/api/production/confirm", server.handleProductionConfirm},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, tt.path, nil)
+			res := httptest.NewRecorder()
+			tt.handler(res, req)
+			if res.Code != http.StatusUnauthorized {
+				t.Fatalf("expected unauthorized, got %d body=%s", res.Code, res.Body.String())
+			}
+		})
+	}
+}
+
+func TestServeHTTPPublicRoutesAndRecorderWrite(t *testing.T) {
+	server := NewServer("secret", NewMemoryStore())
+
+	req := httptest.NewRequest(http.MethodOptions, "/api/orders", nil)
+	res := httptest.NewRecorder()
+	server.ServeHTTP(res, req)
+	if res.Code != http.StatusNoContent {
+		t.Fatalf("expected options 204, got %d", res.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	res = httptest.NewRecorder()
+	server.ServeHTTP(res, req)
+	if res.Code != http.StatusOK || !strings.Contains(res.Body.String(), "woms_http_requests_total") {
+		t.Fatalf("expected metrics body, got %d %s", res.Code, res.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/missing", nil)
+	res = httptest.NewRecorder()
+	server.ServeHTTP(res, req)
+	if res.Code != http.StatusNotFound {
+		t.Fatalf("expected missing route 404, got %d", res.Code)
+	}
+
+	rec := &statusRecorder{ResponseWriter: httptest.NewRecorder()}
+	if _, err := rec.Write([]byte("ok")); err != nil {
+		t.Fatalf("recorder write: %v", err)
+	}
+	if rec.status != http.StatusOK {
+		t.Fatalf("expected implicit 200 from Write, got %d", rec.status)
+	}
+}
+
+func TestScheduleJobCalendarAndProductionErrorBranches(t *testing.T) {
+	store := NewMemoryStore()
+	schedulerClaims := auth.Claims{Subject: "user-scheduler-a", Role: domain.RoleScheduler, LineID: "A"}
+
+	if job := store.ExecuteScheduleJob("missing"); job.ID != "" {
+		t.Fatalf("missing job should return zero value, got %+v", job)
+	}
+	store.jobs["JOB-MISSING-REQ"] = domain.ScheduleJob{ID: "JOB-MISSING-REQ", LineID: "A", Status: domain.JobQueued}
+	if job := store.ExecuteScheduleJob("JOB-MISSING-REQ"); job.Status != domain.JobFailed || !strings.Contains(job.Message, "找不到排程任務內容") {
+		t.Fatalf("expected missing request failure, got %+v", job)
+	}
+
+	store.jobRequests["JOB-REVISION"] = scheduleRequest{LineID: "A", CurrentDate: "2026-04-30", StartDate: "2026-05-01"}
+	store.jobs["JOB-REVISION"] = domain.ScheduleJob{ID: "JOB-REVISION", LineID: "A", Status: domain.JobQueued, LineRevision: -1}
+	if job := store.ExecuteScheduleJob("JOB-REVISION"); job.Status != domain.JobFailed || !strings.Contains(job.Message, "排程資料已變更") {
+		t.Fatalf("expected stale revision failure, got %+v", job)
+	}
+
+	if _, err := store.ScheduleCalendar("", "", auth.Claims{Role: domain.RoleSales}); err == nil || !strings.Contains(err.Error(), "lineId is required") {
+		t.Fatalf("expected missing line calendar error, got %v", err)
+	}
+	if _, err := store.ScheduleCalendar("missing", "2026-05", auth.Claims{Role: domain.RoleAdmin}); err == nil || !strings.Contains(err.Error(), "production line does not exist") {
+		t.Fatalf("expected missing line error, got %v", err)
+	}
+	if _, err := store.ScheduleCalendar("A", "2026/05", schedulerClaims); err == nil || !strings.Contains(err.Error(), "YYYY-MM") {
+		t.Fatalf("expected invalid month error, got %v", err)
+	}
+	defaulted, err := store.ScheduleCalendar("", "", schedulerClaims)
+	if err != nil {
+		t.Fatalf("default scheduler calendar: %v", err)
+	}
+	if defaulted.LineID != "A" || defaulted.Month != "2026-04" || defaulted.Timezone == "" {
+		t.Fatalf("expected scheduler default line/month calendar, got %+v", defaulted)
+	}
+
+	if _, err := store.StartProduction(productionStartRequest{OrderID: "missing"}, schedulerClaims); err == nil || !strings.Contains(err.Error(), "order not found") {
+		t.Fatalf("expected missing order start error, got %v", err)
+	}
+	store.orders["ORD-NO-ALLOC"] = domain.Order{ID: "ORD-NO-ALLOC", LineID: "A", Status: domain.StatusScheduled}
+	if _, err := store.StartProduction(productionStartRequest{OrderID: "ORD-NO-ALLOC"}, schedulerClaims); err == nil || !strings.Contains(err.Error(), "no allocation") {
+		t.Fatalf("expected no allocation start error, got %v", err)
+	}
+
+	if _, err := store.ConfirmProduction(productionConfirmRequest{OrderID: "missing"}, schedulerClaims); err == nil || !strings.Contains(err.Error(), "order not found") {
+		t.Fatalf("expected missing order confirm error, got %v", err)
+	}
+	store.orders["ORD-INPROGRESS"] = domain.Order{ID: "ORD-INPROGRESS", LineID: "A", Status: domain.StatusInProgress, Quantity: 100}
+	if _, err := store.ConfirmProduction(productionConfirmRequest{OrderID: "ORD-INPROGRESS", ProducedQuantity: 0, ProductionDate: "2026-05-01"}, schedulerClaims); err == nil || !strings.Contains(err.Error(), "greater than zero") {
+		t.Fatalf("expected produced quantity error, got %v", err)
+	}
+	if _, err := store.ConfirmProduction(productionConfirmRequest{OrderID: "ORD-INPROGRESS", ProducedQuantity: 10, ProductionDate: "bad-date"}, schedulerClaims); err == nil || !strings.Contains(err.Error(), "YYYY-MM-DD") {
+		t.Fatalf("expected production date error, got %v", err)
 	}
 }
 
@@ -2430,5 +2715,13 @@ type failingVerifyTokenSessionStore struct {
 }
 
 func (failingVerifyTokenSessionStore) Verify(context.Context, string, auth.Claims) error {
+	return errors.New("redis unavailable")
+}
+
+type failingSaveTokenSessionStore struct {
+	NoopTokenSessionStore
+}
+
+func (failingSaveTokenSessionStore) Save(context.Context, string, auth.Claims) error {
 	return errors.New("redis unavailable")
 }
