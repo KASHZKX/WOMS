@@ -514,6 +514,26 @@ func TestMemoryStoreHPAPeakDemoCreatesSortableJobsAndClearSummary(t *testing.T) 
 	if err != nil {
 		t.Fatalf("create hpa peak demo: %v", err)
 	}
+	assertHPAPeakCreatedSummary(t, summary)
+
+	jobs := store.HPAPeakJobs()
+	assertHPAPeakJobsSorted(t, jobs)
+
+	cleared, err := store.ClearHPAPeakDemo(claims)
+	if err != nil {
+		t.Fatalf("clear hpa peak demo: %v", err)
+	}
+	assertHPAPeakClearedSummary(t, cleared)
+
+	reset, err := store.CreateHPAPeakDemo(claims)
+	if err != nil {
+		t.Fatalf("recreate hpa peak demo after clear: %v", err)
+	}
+	assertHPAPeakResetSummary(t, reset)
+}
+
+func assertHPAPeakCreatedSummary(t *testing.T, summary hpaPeakSummary) {
+	t.Helper()
 	if summary.LineCount != hpaDemoLastLine || summary.OrderCount != hpaDemoLastLine*hpaDemoOrdersPerLine {
 		t.Fatalf("unexpected hpa demo workload summary: %+v", summary)
 	}
@@ -523,29 +543,29 @@ func TestMemoryStoreHPAPeakDemoCreatesSortableJobsAndClearSummary(t *testing.T) 
 	if len(summary.RecentJobs) != 10 || summary.RecentJobs[0].ID != "HPA-JOB-L001-001" {
 		t.Fatalf("expected sorted recent HPA jobs, got %+v", summary.RecentJobs)
 	}
+}
 
-	jobs := store.HPAPeakJobs()
+func assertHPAPeakJobsSorted(t *testing.T, jobs []domain.ScheduleJob) {
+	t.Helper()
 	if len(jobs) != hpaDemoLastLine*hpaDemoJobsPerLine {
 		t.Fatalf("expected all HPA jobs, got %d", len(jobs))
 	}
 	if jobs[0].ID != "HPA-JOB-L001-001" || jobs[len(jobs)-1].ID != "HPA-JOB-L200-002" {
 		t.Fatalf("expected sorted HPA job list, first=%+v last=%+v", jobs[0], jobs[len(jobs)-1])
 	}
+}
 
-	cleared, err := store.ClearHPAPeakDemo(claims)
-	if err != nil {
-		t.Fatalf("clear hpa peak demo: %v", err)
+func assertHPAPeakClearedSummary(t *testing.T, summary hpaPeakSummary) {
+	t.Helper()
+	if summary.LineCount != 0 || summary.OrderCount != 0 || summary.Statuses[string(domain.JobCancelled)] != hpaDemoLastLine*hpaDemoJobsPerLine {
+		t.Fatalf("expected queued demo jobs to be cancelled and lines/orders cleared, got %+v", summary)
 	}
-	if cleared.LineCount != 0 || cleared.OrderCount != 0 || cleared.Statuses[string(domain.JobCancelled)] != hpaDemoLastLine*hpaDemoJobsPerLine {
-		t.Fatalf("expected queued demo jobs to be cancelled and lines/orders cleared, got %+v", cleared)
-	}
+}
 
-	reset, err := store.CreateHPAPeakDemo(claims)
-	if err != nil {
-		t.Fatalf("recreate hpa peak demo after clear: %v", err)
-	}
-	if reset.Statuses[string(domain.JobCancelled)] != 0 || reset.Statuses[string(domain.JobQueued)] != hpaDemoLastLine*hpaDemoJobsPerLine {
-		t.Fatalf("reset should remove cancelled demo jobs before recreating, got %+v", reset.Statuses)
+func assertHPAPeakResetSummary(t *testing.T, summary hpaPeakSummary) {
+	t.Helper()
+	if summary.Statuses[string(domain.JobCancelled)] != 0 || summary.Statuses[string(domain.JobQueued)] != hpaDemoLastLine*hpaDemoJobsPerLine {
+		t.Fatalf("reset should remove cancelled demo jobs before recreating, got %+v", summary.Statuses)
 	}
 }
 
@@ -803,54 +823,72 @@ func TestScheduleJobCalendarAndProductionErrorBranches(t *testing.T) {
 	store := NewMemoryStore()
 	schedulerClaims := auth.Claims{Subject: "user-scheduler-a", Role: domain.RoleScheduler, LineID: "A"}
 
-	if job := store.ExecuteScheduleJob("missing"); job.ID != "" {
-		t.Fatalf("missing job should return zero value, got %+v", job)
-	}
+	assertMissingScheduleJob(t, store)
 	store.jobs["JOB-MISSING-REQ"] = domain.ScheduleJob{ID: "JOB-MISSING-REQ", LineID: "A", Status: domain.JobQueued}
-	if job := store.ExecuteScheduleJob("JOB-MISSING-REQ"); job.Status != domain.JobFailed || !strings.Contains(job.Message, "找不到排程任務內容") {
-		t.Fatalf("expected missing request failure, got %+v", job)
-	}
+	assertScheduleJobFailure(t, store, "JOB-MISSING-REQ", "找不到排程任務內容")
 
 	store.jobRequests["JOB-REVISION"] = scheduleRequest{LineID: "A", CurrentDate: "2026-04-30", StartDate: "2026-05-01"}
 	store.jobs["JOB-REVISION"] = domain.ScheduleJob{ID: "JOB-REVISION", LineID: "A", Status: domain.JobQueued, LineRevision: -1}
-	if job := store.ExecuteScheduleJob("JOB-REVISION"); job.Status != domain.JobFailed || !strings.Contains(job.Message, "排程資料已變更") {
-		t.Fatalf("expected stale revision failure, got %+v", job)
-	}
+	assertScheduleJobFailure(t, store, "JOB-REVISION", "排程資料已變更")
 
-	if _, err := store.ScheduleCalendar("", "", auth.Claims{Role: domain.RoleSales}); err == nil || !strings.Contains(err.Error(), "lineId is required") {
-		t.Fatalf("expected missing line calendar error, got %v", err)
+	assertScheduleCalendarError(t, store, "", "", auth.Claims{Role: domain.RoleSales}, "lineId is required")
+	assertScheduleCalendarError(t, store, "missing", "2026-05", auth.Claims{Role: domain.RoleAdmin}, "production line does not exist")
+	assertScheduleCalendarError(t, store, "A", "2026/05", schedulerClaims, "YYYY-MM")
+	assertDefaultSchedulerCalendar(t, store, schedulerClaims)
+
+	assertStartProductionError(t, store, productionStartRequest{OrderID: "missing"}, schedulerClaims, "order not found")
+	store.orders["ORD-NO-ALLOC"] = domain.Order{ID: "ORD-NO-ALLOC", LineID: "A", Status: domain.StatusScheduled}
+	assertStartProductionError(t, store, productionStartRequest{OrderID: "ORD-NO-ALLOC"}, schedulerClaims, "no allocation")
+
+	assertConfirmProductionError(t, store, productionConfirmRequest{OrderID: "missing"}, schedulerClaims, "order not found")
+	store.orders["ORD-INPROGRESS"] = domain.Order{ID: "ORD-INPROGRESS", LineID: "A", Status: domain.StatusInProgress, Quantity: 100}
+	assertConfirmProductionError(t, store, productionConfirmRequest{OrderID: "ORD-INPROGRESS", ProducedQuantity: 0, ProductionDate: "2026-05-01"}, schedulerClaims, "greater than zero")
+	assertConfirmProductionError(t, store, productionConfirmRequest{OrderID: "ORD-INPROGRESS", ProducedQuantity: 10, ProductionDate: "bad-date"}, schedulerClaims, "YYYY-MM-DD")
+}
+
+func assertMissingScheduleJob(t *testing.T, store *MemoryStore) {
+	t.Helper()
+	if job := store.ExecuteScheduleJob("missing"); job.ID != "" {
+		t.Fatalf("missing job should return zero value, got %+v", job)
 	}
-	if _, err := store.ScheduleCalendar("missing", "2026-05", auth.Claims{Role: domain.RoleAdmin}); err == nil || !strings.Contains(err.Error(), "production line does not exist") {
-		t.Fatalf("expected missing line error, got %v", err)
+}
+
+func assertScheduleJobFailure(t *testing.T, store *MemoryStore, id, message string) {
+	t.Helper()
+	if job := store.ExecuteScheduleJob(id); job.Status != domain.JobFailed || !strings.Contains(job.Message, message) {
+		t.Fatalf("expected schedule job failure containing %q, got %+v", message, job)
 	}
-	if _, err := store.ScheduleCalendar("A", "2026/05", schedulerClaims); err == nil || !strings.Contains(err.Error(), "YYYY-MM") {
-		t.Fatalf("expected invalid month error, got %v", err)
+}
+
+func assertScheduleCalendarError(t *testing.T, store *MemoryStore, lineID, month string, claims auth.Claims, message string) {
+	t.Helper()
+	if _, err := store.ScheduleCalendar(lineID, month, claims); err == nil || !strings.Contains(err.Error(), message) {
+		t.Fatalf("expected schedule calendar error containing %q, got %v", message, err)
 	}
-	defaulted, err := store.ScheduleCalendar("", "", schedulerClaims)
+}
+
+func assertDefaultSchedulerCalendar(t *testing.T, store *MemoryStore, claims auth.Claims) {
+	t.Helper()
+	defaulted, err := store.ScheduleCalendar("", "", claims)
 	if err != nil {
 		t.Fatalf("default scheduler calendar: %v", err)
 	}
 	if defaulted.LineID != "A" || defaulted.Month != "2026-04" || defaulted.Timezone == "" {
 		t.Fatalf("expected scheduler default line/month calendar, got %+v", defaulted)
 	}
+}
 
-	if _, err := store.StartProduction(productionStartRequest{OrderID: "missing"}, schedulerClaims); err == nil || !strings.Contains(err.Error(), "order not found") {
-		t.Fatalf("expected missing order start error, got %v", err)
+func assertStartProductionError(t *testing.T, store *MemoryStore, req productionStartRequest, claims auth.Claims, message string) {
+	t.Helper()
+	if _, err := store.StartProduction(req, claims); err == nil || !strings.Contains(err.Error(), message) {
+		t.Fatalf("expected start production error containing %q, got %v", message, err)
 	}
-	store.orders["ORD-NO-ALLOC"] = domain.Order{ID: "ORD-NO-ALLOC", LineID: "A", Status: domain.StatusScheduled}
-	if _, err := store.StartProduction(productionStartRequest{OrderID: "ORD-NO-ALLOC"}, schedulerClaims); err == nil || !strings.Contains(err.Error(), "no allocation") {
-		t.Fatalf("expected no allocation start error, got %v", err)
-	}
+}
 
-	if _, err := store.ConfirmProduction(productionConfirmRequest{OrderID: "missing"}, schedulerClaims); err == nil || !strings.Contains(err.Error(), "order not found") {
-		t.Fatalf("expected missing order confirm error, got %v", err)
-	}
-	store.orders["ORD-INPROGRESS"] = domain.Order{ID: "ORD-INPROGRESS", LineID: "A", Status: domain.StatusInProgress, Quantity: 100}
-	if _, err := store.ConfirmProduction(productionConfirmRequest{OrderID: "ORD-INPROGRESS", ProducedQuantity: 0, ProductionDate: "2026-05-01"}, schedulerClaims); err == nil || !strings.Contains(err.Error(), "greater than zero") {
-		t.Fatalf("expected produced quantity error, got %v", err)
-	}
-	if _, err := store.ConfirmProduction(productionConfirmRequest{OrderID: "ORD-INPROGRESS", ProducedQuantity: 10, ProductionDate: "bad-date"}, schedulerClaims); err == nil || !strings.Contains(err.Error(), "YYYY-MM-DD") {
-		t.Fatalf("expected production date error, got %v", err)
+func assertConfirmProductionError(t *testing.T, store *MemoryStore, req productionConfirmRequest, claims auth.Claims, message string) {
+	t.Helper()
+	if _, err := store.ConfirmProduction(req, claims); err == nil || !strings.Contains(err.Error(), message) {
+		t.Fatalf("expected confirm production error containing %q, got %v", message, err)
 	}
 }
 
