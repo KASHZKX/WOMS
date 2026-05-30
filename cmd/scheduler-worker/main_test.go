@@ -1171,7 +1171,7 @@ func TestMainExitsOnRedisLockPingFailure(t *testing.T) {
 	}
 }
 
-func TestAllErrorPaths(t *testing.T) {
+func TestAllErrorPaths_ProcessDBJobLocked(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("failed to create sqlmock: %v", err)
@@ -1188,7 +1188,6 @@ func TestAllErrorPaths(t *testing.T) {
 
 	// 2. processDBJobLocked Commit failure
 	mock.ExpectBegin()
-	// mock runLockedJobState: status cancelled so it returns nil, true (shouldCommit = true)
 	mock.ExpectQuery("SELECT status FROM schedule_jobs").
 		WithArgs("job-1").
 		WillReturnRows(sqlmock.NewRows([]string{"status"}).AddRow("cancelled"))
@@ -1197,6 +1196,15 @@ func TestAllErrorPaths(t *testing.T) {
 	if err == nil || err.Error() != "commit error" {
 		t.Errorf("expected commit error, got %v", err)
 	}
+}
+
+func TestAllErrorPaths_SqlLockedJobStore(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create sqlmock: %v", err)
+	}
+	defer db.Close()
+	mock.MatchExpectationsInOrder(false)
 
 	mock.ExpectBegin()
 	tx, err := db.Begin()
@@ -1245,6 +1253,22 @@ func TestAllErrorPaths(t *testing.T) {
 	if err == nil || err.Error() != "delete error" {
 		t.Errorf("expected delete error, got %v", err)
 	}
+}
+
+func TestAllErrorPaths_PersistPreviewAllocations(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create sqlmock: %v", err)
+	}
+	defer db.Close()
+	mock.MatchExpectationsInOrder(false)
+
+	mock.ExpectBegin()
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback()
 
 	// 7. persistPreviewAllocations other query error
 	mock.ExpectQuery("SELECT line_revision, allocations FROM schedule_previews").
@@ -1275,7 +1299,7 @@ func TestAllErrorPaths(t *testing.T) {
 	}
 
 	// 10. persistPreviewAllocations line ID mismatch
-	mismatchAllocs := []map[string]any{{"orderId": "ORD-1", "lineId": "B"}} // different line from "A"
+	mismatchAllocs := []map[string]any{{"orderId": "ORD-1", "lineId": "B"}}
 	mismatchJSON, _ := json.Marshal(mismatchAllocs)
 	mock.ExpectQuery("SELECT line_revision, allocations FROM schedule_previews").
 		WillReturnRows(sqlmock.NewRows([]string{"line_revision", "allocations"}).AddRow(int64(5), mismatchJSON))
@@ -1285,6 +1309,22 @@ func TestAllErrorPaths(t *testing.T) {
 	if _, ok := err.(errStaleScheduleData); !ok {
 		t.Errorf("expected errStaleScheduleData on line mismatch, got %v", err)
 	}
+}
+
+func TestAllErrorPaths_PersistLineSchedule(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create sqlmock: %v", err)
+	}
+	defer db.Close()
+	mock.MatchExpectationsInOrder(false)
+
+	mock.ExpectBegin()
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback()
 
 	// 11. persistLineSchedule query orders error
 	mock.ExpectQuery("SELECT id, quantity, priority FROM orders").
@@ -1305,6 +1345,15 @@ func TestAllErrorPaths(t *testing.T) {
 	if err == nil || err.Error() != "lines error" {
 		t.Errorf("expected lines error, got %v", err)
 	}
+}
+
+func TestAllErrorPaths_BackfillQueuedJobs(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create sqlmock: %v", err)
+	}
+	defer db.Close()
+	mock.MatchExpectationsInOrder(false)
 
 	// 13. backfillQueuedJobs db query error
 	mock.ExpectQuery("SELECT id, line_id, COALESCE").

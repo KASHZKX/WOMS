@@ -259,6 +259,55 @@ func deleteRedisTokenSession(t *testing.T, store *RedisTokenSessionStore, token 
 	}
 }
 
+func readRESPCmd(reader *bufio.Reader) ([]string, error) {
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return nil, err
+	}
+	if !strings.HasPrefix(line, "*") {
+		return nil, errors.New("invalid protocol")
+	}
+	countStr := strings.TrimSpace(line[1:])
+	count, err := strconv.Atoi(countStr)
+	if err != nil {
+		return nil, err
+	}
+	var args []string
+	for i := 0; i < count; i++ {
+		lenLine, err := reader.ReadString('\n')
+		if err != nil {
+			return nil, err
+		}
+		if !strings.HasPrefix(lenLine, "$") {
+			return nil, errors.New("invalid bulk string prefix")
+		}
+		length, _ := strconv.Atoi(strings.TrimSpace(lenLine[1:]))
+		buf := make([]byte, length+2)
+		if _, err := io.ReadFull(reader, buf); err != nil {
+			return nil, err
+		}
+		args = append(args, string(buf[:length]))
+	}
+	return args, nil
+}
+
+func handleMockRedisConn(c net.Conn, handler func(cmd string, args []string) string) {
+	defer c.Close()
+	reader := bufio.NewReader(c)
+	for {
+		args, err := readRESPCmd(reader)
+		if err != nil {
+			return
+		}
+		if len(args) == 0 {
+			return
+		}
+		cmd := strings.ToUpper(args[0])
+		resp := handler(cmd, args[1:])
+		_, _ = c.Write([]byte(resp))
+	}
+}
+
 func startMockRedisTokenSessionServer(t *testing.T, handler func(cmd string, args []string) string) (string, func()) {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -283,46 +332,7 @@ func startMockRedisTokenSessionServer(t *testing.T, handler func(cmd string, arg
 					continue
 				}
 			}
-			go func(c net.Conn) {
-				defer c.Close()
-				reader := bufio.NewReader(c)
-				for {
-					line, err := reader.ReadString('\n')
-					if err != nil {
-						return
-					}
-					if !strings.HasPrefix(line, "*") {
-						return
-					}
-					countStr := strings.TrimSpace(line[1:])
-					count, err := strconv.Atoi(countStr)
-					if err != nil {
-						return
-					}
-					var args []string
-					for i := 0; i < count; i++ {
-						lenLine, err := reader.ReadString('\n')
-						if err != nil {
-							return
-						}
-						if !strings.HasPrefix(lenLine, "$") {
-							return
-						}
-						length, _ := strconv.Atoi(strings.TrimSpace(lenLine[1:]))
-						buf := make([]byte, length+2)
-						if _, err := io.ReadFull(reader, buf); err != nil {
-							return
-						}
-						args = append(args, string(buf[:length]))
-					}
-					if len(args) == 0 {
-						return
-					}
-					cmd := strings.ToUpper(args[0])
-					resp := handler(cmd, args[1:])
-					_, _ = c.Write([]byte(resp))
-				}
-			}(conn)
+			go handleMockRedisConn(conn, handler)
 		}
 	}()
 
@@ -333,8 +343,7 @@ func startMockRedisTokenSessionServer(t *testing.T, handler func(cmd string, arg
 	}
 }
 
-func TestMockRedisTokenSessionStore(t *testing.T) {
-	// 1. NoopTokenSessionStore
+func TestMockRedisTokenSessionStore_Noop(t *testing.T) {
 	noop := NoopTokenSessionStore{}
 	if err := noop.Save(context.Background(), "t", auth.Claims{}); err != nil {
 		t.Errorf("noop.Save failed: %v", err)
@@ -351,15 +360,14 @@ func TestMockRedisTokenSessionStore(t *testing.T) {
 	if err := noop.Close(); err != nil {
 		t.Errorf("noop.Close failed: %v", err)
 	}
+}
 
-	// 2. MemoryTokenSessionStore
+func TestMockRedisTokenSessionStore_Memory(t *testing.T) {
 	mem := NewMemoryTokenSessionStore()
 	if !mem.TracksSessions() {
 		t.Error("memory store should track sessions")
 	}
-	if err := mem.Close(); err != nil {
-		t.Errorf("memory.Close failed: %v", err)
-	}
+	defer mem.Close()
 
 	ctx := context.Background()
 	claims := auth.Claims{
@@ -412,8 +420,21 @@ func TestMockRedisTokenSessionStore(t *testing.T) {
 	if err != nil || revoked2 {
 		t.Errorf("revoking non-existent token: revoked=%v, err=%v", revoked2, err)
 	}
+}
 
-	// 3. RedisTokenSessionStore with Mock Server
+func TestMockRedisTokenSessionStore_MockRedisSave(t *testing.T) {
+	ctx := context.Background()
+	claims := auth.Claims{
+		Subject: "user",
+		Role:    domain.RoleSales,
+		Expires: time.Now().Add(5 * time.Minute).Unix(),
+	}
+	expiredClaims := auth.Claims{
+		Subject: "user",
+		Role:    domain.RoleSales,
+		Expires: time.Now().Add(-5 * time.Minute).Unix(),
+	}
+
 	addr, cleanup := startMockRedisTokenSessionServer(t, func(cmd string, args []string) string {
 		switch cmd {
 		case "PING":
@@ -464,6 +485,43 @@ func TestMockRedisTokenSessionStore(t *testing.T) {
 	}
 
 	// Test Save OK
+	if err := rstore.Save(ctx, "token", claims); err != nil {
+		t.Fatalf("redis save failed: %v", err)
+	}
+}
+
+func TestMockRedisTokenSessionStore_MockRedisVerify(t *testing.T) {
+	ctx := context.Background()
+	claims := auth.Claims{
+		Subject: "user",
+		Role:    domain.RoleSales,
+		Expires: time.Now().Add(5 * time.Minute).Unix(),
+	}
+
+	addr, cleanup := startMockRedisTokenSessionServer(t, func(cmd string, args []string) string {
+		switch cmd {
+		case "PING":
+			return "+PONG\r\n"
+		case "SET":
+			return "+OK\r\n"
+		case "GET":
+			if len(args) > 0 && args[0] == tokenSessionKey("token") {
+				return "$1\r\n1\r\n"
+			}
+			return "$-1\r\n"
+		case "DEL":
+			return ":1\r\n"
+		default:
+			return "-ERR unknown command\r\n"
+		}
+	})
+	defer cleanup()
+
+	rstore := NewRedisTokenSessionStore(addr)
+	rstore.timeout = 500 * time.Millisecond
+	defer rstore.Close()
+
+	// Test Save OK for Verification
 	if err := rstore.Save(ctx, "token", claims); err != nil {
 		t.Fatalf("redis save failed: %v", err)
 	}

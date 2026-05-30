@@ -194,9 +194,61 @@ func acquireAfterExpiry(t *testing.T, p *RedisProvider, key string) Lock {
 	return nil
 }
 
+func readRESPCmd(reader *bufio.Reader) ([]string, error) {
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return nil, err
+	}
+	if !strings.HasPrefix(line, "*") {
+		return nil, errors.New("invalid protocol")
+	}
+	countStr := strings.TrimSpace(line[1:])
+	count, err := strconv.Atoi(countStr)
+	if err != nil {
+		return nil, err
+	}
+	var args []string
+	for i := 0; i < count; i++ {
+		lenLine, err := reader.ReadString('\n')
+		if err != nil {
+			return nil, err
+		}
+		if !strings.HasPrefix(lenLine, "$") {
+			return nil, errors.New("invalid bulk string prefix")
+		}
+		length, _ := strconv.Atoi(strings.TrimSpace(lenLine[1:]))
+		buf := make([]byte, length+2)
+		if _, err := io.ReadFull(reader, buf); err != nil {
+			return nil, err
+		}
+		args = append(args, string(buf[:length]))
+	}
+	return args, nil
+}
+
+func handleMockRedisServerConn(c net.Conn, handler func(cmd string) string) {
+	defer c.Close()
+	reader := bufio.NewReader(c)
+	for {
+		args, err := readRESPCmd(reader)
+		if err != nil {
+			return
+		}
+		if len(args) == 0 {
+			return
+		}
+		cmd := strings.ToUpper(args[0])
+		resp := handler(cmd)
+		_, _ = c.Write([]byte(resp))
+	}
+}
+
 func startMockRedisServer(t *testing.T, handler func(cmd string) string) (string, func()) {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
+		if strings.Contains(err.Error(), "operation not permitted") {
+			t.Skipf("tcp listen is not permitted in this sandbox: %v", err)
+		}
 		t.Fatalf("failed to start mock redis: %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -215,46 +267,7 @@ func startMockRedisServer(t *testing.T, handler func(cmd string) string) (string
 					continue
 				}
 			}
-			go func(c net.Conn) {
-				defer c.Close()
-				reader := bufio.NewReader(c)
-				for {
-					line, err := reader.ReadString('\n')
-					if err != nil {
-						return
-					}
-					if !strings.HasPrefix(line, "*") {
-						return
-					}
-					countStr := strings.TrimSpace(line[1:])
-					count, err := strconv.Atoi(countStr)
-					if err != nil {
-						return
-					}
-					var args []string
-					for i := 0; i < count; i++ {
-						lenLine, err := reader.ReadString('\n')
-						if err != nil {
-							return
-						}
-						if !strings.HasPrefix(lenLine, "$") {
-							return
-						}
-						length, _ := strconv.Atoi(strings.TrimSpace(lenLine[1:]))
-						buf := make([]byte, length+2)
-						if _, err := io.ReadFull(reader, buf); err != nil {
-							return
-						}
-						args = append(args, string(buf[:length]))
-					}
-					if len(args) == 0 {
-						return
-					}
-					cmd := strings.ToUpper(args[0])
-					resp := handler(cmd)
-					_, _ = c.Write([]byte(resp))
-				}
-			}(conn)
+			go handleMockRedisServerConn(conn, handler)
 		}
 	}()
 

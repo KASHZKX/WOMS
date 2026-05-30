@@ -948,7 +948,7 @@ func TestPostgresStore_NewPostgresStoreContext_PingFailure(t *testing.T) {
 	}
 }
 
-func TestPostgresStore_CancelOrders_Various(t *testing.T) {
+func TestPostgresStore_CancelOrders_Initial(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("failed to create sqlmock: %v", err)
@@ -964,12 +964,6 @@ func TestPostgresStore_CancelOrders_Various(t *testing.T) {
 	salesClaims := auth.Claims{
 		Subject: "sales-1",
 		Role:    domain.RoleSales,
-	}
-
-	schedulerClaimsA := auth.Claims{
-		Subject: "scheduler-1",
-		Role:    domain.RoleScheduler,
-		LineID:  "A",
 	}
 
 	// 1. empty order IDs
@@ -1005,6 +999,31 @@ func TestPostgresStore_CancelOrders_Various(t *testing.T) {
 	}
 	if len(resp.SkippedOrderIDs) != 2 {
 		t.Errorf("expected 2 skipped orders, got %+v", resp.SkippedOrderIDs)
+	}
+}
+
+func TestPostgresStore_CancelOrders_Permissions(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create sqlmock: %v", err)
+	}
+	defer db.Close()
+	mock.MatchExpectationsInOrder(false)
+
+	store := &PostgresStore{
+		MemoryStore: NewMemoryStore(),
+		db:          db,
+	}
+
+	salesClaims := auth.Claims{
+		Subject: "sales-1",
+		Role:    domain.RoleSales,
+	}
+
+	schedulerClaimsA := auth.Claims{
+		Subject: "scheduler-1",
+		Role:    domain.RoleScheduler,
+		LineID:  "A",
 	}
 
 	// 4. Sales cannot cancel other sales' order
@@ -1053,6 +1072,26 @@ func TestPostgresStore_CancelOrders_Various(t *testing.T) {
 	_, err = store.CancelOrders(cancelOrdersRequest{OrderIDs: []string{"ORD-6"}}, schedulerClaimsA)
 	if err == nil || !strings.Contains(err.Error(), "cannot cancel in-progress or completed orders") {
 		t.Errorf("expected progress restriction error, got %v", err)
+	}
+}
+
+func TestPostgresStore_CancelOrders_Success(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create sqlmock: %v", err)
+	}
+	defer db.Close()
+	mock.MatchExpectationsInOrder(false)
+
+	store := &PostgresStore{
+		MemoryStore: NewMemoryStore(),
+		db:          db,
+	}
+
+	schedulerClaimsA := auth.Claims{
+		Subject: "scheduler-1",
+		Role:    domain.RoleScheduler,
+		LineID:  "A",
 	}
 
 	// 8. Successful cancellation
@@ -1412,7 +1451,7 @@ func TestPostgresStore_StartProduction_Various(t *testing.T) {
 	}
 }
 
-func TestPostgresStore_ConfirmProduction_Various(t *testing.T) {
+func TestPostgresStore_ConfirmProduction_Initial(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("failed to create sqlmock: %v", err)
@@ -1427,7 +1466,6 @@ func TestPostgresStore_ConfirmProduction_Various(t *testing.T) {
 
 	tNow := time.Now().UTC()
 
-	// Helper to mock fetching order
 	mockOrder := func(id, lineID, status string) {
 		rows := sqlmock.NewRows([]string{
 			"id", "customer", "line_id", "quantity", "priority", "status", "due_date", "note", "created_by",
@@ -1459,6 +1497,38 @@ func TestPostgresStore_ConfirmProduction_Various(t *testing.T) {
 	if err == nil || err.Error() != "cannot confirm another production line" {
 		t.Errorf("expected line mismatch error, got %v", err)
 	}
+}
+
+func TestPostgresStore_ConfirmProduction_Validation(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create sqlmock: %v", err)
+	}
+	defer db.Close()
+	mock.MatchExpectationsInOrder(false)
+
+	store := &PostgresStore{
+		MemoryStore: NewMemoryStore(),
+		db:          db,
+	}
+
+	tNow := time.Now().UTC()
+
+	mockOrder := func(id, lineID, status string) {
+		rows := sqlmock.NewRows([]string{
+			"id", "customer", "line_id", "quantity", "priority", "status", "due_date", "note", "created_by",
+			"source_order", "rejection_reason", "rejected_by", "rejected_at", "created_at", "updated_at",
+		}).AddRow(id, "ACME", lineID, 100, string(domain.PriorityLow), status, tNow, "", "sales-1", "", "", "", nil, tNow, tNow)
+		mock.ExpectQuery("SELECT id, customer, line_id.* FROM orders WHERE id = \\$1").
+			WithArgs(id).
+			WillReturnRows(rows)
+	}
+
+	claims := auth.Claims{
+		Role:    domain.RoleScheduler,
+		LineID:  "line-a",
+		Subject: "sched-1",
+	}
 
 	// 2. only in-progress orders can be confirmed
 	mockOrder("ORD-1", "line-a", string(domain.StatusPending))
@@ -1479,6 +1549,38 @@ func TestPostgresStore_ConfirmProduction_Various(t *testing.T) {
 	_, err = store.ConfirmProduction(productionConfirmRequest{OrderID: "ORD-1", ProducedQuantity: 50, ProductionDate: "invalid-date"}, claims)
 	if err == nil || err.Error() != "productionDate must use YYYY-MM-DD" {
 		t.Errorf("expected invalid date error, got %v", err)
+	}
+}
+
+func TestPostgresStore_ConfirmProduction_Allocation(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create sqlmock: %v", err)
+	}
+	defer db.Close()
+	mock.MatchExpectationsInOrder(false)
+
+	store := &PostgresStore{
+		MemoryStore: NewMemoryStore(),
+		db:          db,
+	}
+
+	tNow := time.Now().UTC()
+
+	mockOrder := func(id, lineID, status string) {
+		rows := sqlmock.NewRows([]string{
+			"id", "customer", "line_id", "quantity", "priority", "status", "due_date", "note", "created_by",
+			"source_order", "rejection_reason", "rejected_by", "rejected_at", "created_at", "updated_at",
+		}).AddRow(id, "ACME", lineID, 100, string(domain.PriorityLow), status, tNow, "", "sales-1", "", "", "", nil, tNow, tNow)
+		mock.ExpectQuery("SELECT id, customer, line_id.* FROM orders WHERE id = \\$1").
+			WithArgs(id).
+			WillReturnRows(rows)
+	}
+
+	claims := auth.Claims{
+		Role:    domain.RoleScheduler,
+		LineID:  "line-a",
+		Subject: "sched-1",
 	}
 
 	// 5. scheduled allocation not found for productionDate (sql.ErrNoRows)

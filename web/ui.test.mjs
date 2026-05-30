@@ -153,6 +153,14 @@ test("compose NGINX status allows the separate exporter container", () => {
   assert.match(nginxStatus, /deny all;/);
 });
 
+test("web Dockerfile keeps non-root NGINX pid in writable tmp", () => {
+  const dockerfile = readFileSync(new URL("../Dockerfile.web", import.meta.url), "utf8");
+
+  assert.match(dockerfile, /sed -i 's\|pid\s+\/var\/run\/nginx\.pid;\|pid\s+\/tmp\/nginx\.pid;\|'/);
+  assert.match(dockerfile, /USER nginx/);
+  assert.doesNotMatch(dockerfile, /USER root/);
+});
+
 test("web nginx proxies Grafana under the local 8081 web URL", () => {
   const nginx = readFileSync(new URL("./nginx.conf.template", import.meta.url), "utf8");
   const composeNginx = readFileSync(new URL("./nginx.compose.conf.template", import.meta.url), "utf8");
