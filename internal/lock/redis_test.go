@@ -226,6 +226,23 @@ func readRESPCmd(reader *bufio.Reader) ([]string, error) {
 	return args, nil
 }
 
+func handleMockRedisServerConn(c net.Conn, handler func(cmd string) string) {
+	defer c.Close()
+	reader := bufio.NewReader(c)
+	for {
+		args, err := readRESPCmd(reader)
+		if err != nil {
+			return
+		}
+		if len(args) == 0 {
+			return
+		}
+		cmd := strings.ToUpper(args[0])
+		resp := handler(cmd)
+		_, _ = c.Write([]byte(resp))
+	}
+}
+
 func startMockRedisServer(t *testing.T, handler func(cmd string) string) (string, func()) {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -250,22 +267,7 @@ func startMockRedisServer(t *testing.T, handler func(cmd string) string) (string
 					continue
 				}
 			}
-			go func(c net.Conn) {
-				defer c.Close()
-				reader := bufio.NewReader(c)
-				for {
-					args, err := readRESPCmd(reader)
-					if err != nil {
-						return
-					}
-					if len(args) == 0 {
-						return
-					}
-					cmd := strings.ToUpper(args[0])
-					resp := handler(cmd)
-					_, _ = c.Write([]byte(resp))
-				}
-			}(conn)
+			go handleMockRedisServerConn(conn, handler)
 		}
 	}()
 
