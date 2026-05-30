@@ -1,7 +1,11 @@
 package main
 
 import (
+	"net"
+	"os"
+	"os/exec"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -86,5 +90,142 @@ func TestParseAPIConfigFallsBackForMalformedAndNegativeDurations(t *testing.T) {
 	}
 	if config.DependencyInterval != 2*time.Second {
 		t.Fatalf("DependencyInterval = %s, want fallback", config.DependencyInterval)
+	}
+}
+
+func TestMainExitsOnPostgresStoreFailure(t *testing.T) {
+	if os.Getenv("BE_CRASHY_API") == "1" {
+		t.Setenv("API_STORE", "postgres")
+		t.Setenv("DATABASE_URL", "postgres://localhost:9999/invalid")
+		t.Setenv("API_DEPENDENCY_RETRY_TIMEOUT_MS", "1")
+		t.Setenv("API_DEPENDENCY_RETRY_INTERVAL_MS", "1")
+		main()
+		return
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=TestMainExitsOnPostgresStoreFailure")
+	cmd.Env = append(os.Environ(), "BE_CRASHY_API=1")
+	err := cmd.Run()
+	if err == nil {
+		t.Fatalf("expected command to exit with error")
+	}
+}
+
+func TestMainExitsOnKafkaFailure(t *testing.T) {
+	if os.Getenv("BE_CRASHY_API") == "2" {
+		t.Setenv("API_STORE", "memory")
+		t.Setenv("KAFKA_PUBLISH_ENABLED", "true")
+		t.Setenv("KAFKA_BROKERS", "localhost:9999")
+		t.Setenv("API_DEPENDENCY_RETRY_TIMEOUT_MS", "1")
+		t.Setenv("API_DEPENDENCY_RETRY_INTERVAL_MS", "1")
+		main()
+		return
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=TestMainExitsOnKafkaFailure")
+	cmd.Env = append(os.Environ(), "BE_CRASHY_API=2")
+	err := cmd.Run()
+	if err == nil {
+		t.Fatalf("expected command to exit with error")
+	}
+}
+
+func TestMainExitsOnRedisSessionMissingAddr(t *testing.T) {
+	if os.Getenv("BE_CRASHY_API") == "3" {
+		t.Setenv("API_STORE", "memory")
+		t.Setenv("KAFKA_PUBLISH_ENABLED", "false")
+		t.Setenv("AUTH_SESSION_STORE", "redis")
+		t.Setenv("REDIS_ADDR", "") // missing REDIS_ADDR
+		main()
+		return
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=TestMainExitsOnRedisSessionMissingAddr")
+	cmd.Env = append(os.Environ(), "BE_CRASHY_API=3")
+	err := cmd.Run()
+	if err == nil {
+		t.Fatalf("expected command to exit with error")
+	}
+}
+
+func TestMainExitsOnRedisSessionPingFailure(t *testing.T) {
+	if os.Getenv("BE_CRASHY_API") == "4" {
+		t.Setenv("API_STORE", "memory")
+		t.Setenv("KAFKA_PUBLISH_ENABLED", "false")
+		t.Setenv("AUTH_SESSION_STORE", "redis")
+		t.Setenv("REDIS_ADDR", "localhost:9999")
+		t.Setenv("API_DEPENDENCY_RETRY_TIMEOUT_MS", "1")
+		t.Setenv("API_DEPENDENCY_RETRY_INTERVAL_MS", "1")
+		main()
+		return
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=TestMainExitsOnRedisSessionPingFailure")
+	cmd.Env = append(os.Environ(), "BE_CRASHY_API=4")
+	err := cmd.Run()
+	if err == nil {
+		t.Fatalf("expected command to exit with error")
+	}
+}
+
+func TestMainExitsOnHTTPListenFailure(t *testing.T) {
+	if os.Getenv("BE_CRASHY_API") == "5" {
+		t.Setenv("API_STORE", "memory")
+		t.Setenv("DEMO_SEED_DATA", "false")
+		t.Setenv("KAFKA_PUBLISH_ENABLED", "false")
+		t.Setenv("HTTP_ADDR", "9999.9999.9999.9999:80") // invalid address to fail listen
+		main()
+		return
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=TestMainExitsOnHTTPListenFailure")
+	cmd.Env = append(os.Environ(), "BE_CRASHY_API=5")
+	err := cmd.Run()
+	if err == nil {
+		t.Fatalf("expected command to exit with error")
+	}
+}
+
+func TestMainRunsWithMemoryStore(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		if strings.Contains(err.Error(), "operation not permitted") {
+			t.Skip("tcp listen blocked in sandbox")
+		}
+		t.Fatalf("listen: %v", err)
+	}
+	addr := l.Addr().String()
+	l.Close()
+
+	if os.Getenv("BE_RUNNING_API") == "1" {
+		t.Setenv("API_STORE", "memory")
+		t.Setenv("DEMO_SEED_DATA", "true")
+		t.Setenv("KAFKA_PUBLISH_ENABLED", "false")
+		t.Setenv("HTTP_ADDR", addr)
+		main()
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=TestMainRunsWithMemoryStore")
+	cmd.Env = append(os.Environ(), "BE_RUNNING_API=1")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	time.Sleep(200 * time.Millisecond)
+	_ = cmd.Process.Kill()
+	_ = cmd.Wait()
+}
+
+func TestEnvHelpers(t *testing.T) {
+	t.Setenv("TEST_ENV_VAR", "value")
+	if got := env("TEST_ENV_VAR", "fallback"); got != "value" {
+		t.Errorf("env = %q, want value", got)
+	}
+	if got := env("TEST_NON_EXISTENT", "fallback"); got != "fallback" {
+		t.Errorf("env = %q, want fallback", got)
+	}
+
+	t.Setenv("TEST_DURATION_VAR", "500")
+	if got := envDuration("TEST_DURATION_VAR", time.Second); got != 500*time.Millisecond {
+		t.Errorf("envDuration = %s, want 500ms", got)
+	}
+	if got := envDuration("TEST_NON_EXISTENT_DURATION", time.Second); got != time.Second {
+		t.Errorf("envDuration = %s, want 1s", got)
 	}
 }
