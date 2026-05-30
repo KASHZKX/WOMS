@@ -259,6 +259,38 @@ func deleteRedisTokenSession(t *testing.T, store *RedisTokenSessionStore, token 
 	}
 }
 
+func readRESPCmd(reader *bufio.Reader) ([]string, error) {
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return nil, err
+	}
+	if !strings.HasPrefix(line, "*") {
+		return nil, errors.New("invalid protocol")
+	}
+	countStr := strings.TrimSpace(line[1:])
+	count, err := strconv.Atoi(countStr)
+	if err != nil {
+		return nil, err
+	}
+	var args []string
+	for i := 0; i < count; i++ {
+		lenLine, err := reader.ReadString('\n')
+		if err != nil {
+			return nil, err
+		}
+		if !strings.HasPrefix(lenLine, "$") {
+			return nil, errors.New("invalid bulk string prefix")
+		}
+		length, _ := strconv.Atoi(strings.TrimSpace(lenLine[1:]))
+		buf := make([]byte, length+2)
+		if _, err := io.ReadFull(reader, buf); err != nil {
+			return nil, err
+		}
+		args = append(args, string(buf[:length]))
+	}
+	return args, nil
+}
+
 func startMockRedisTokenSessionServer(t *testing.T, handler func(cmd string, args []string) string) (string, func()) {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -287,33 +319,9 @@ func startMockRedisTokenSessionServer(t *testing.T, handler func(cmd string, arg
 				defer c.Close()
 				reader := bufio.NewReader(c)
 				for {
-					line, err := reader.ReadString('\n')
+					args, err := readRESPCmd(reader)
 					if err != nil {
 						return
-					}
-					if !strings.HasPrefix(line, "*") {
-						return
-					}
-					countStr := strings.TrimSpace(line[1:])
-					count, err := strconv.Atoi(countStr)
-					if err != nil {
-						return
-					}
-					var args []string
-					for i := 0; i < count; i++ {
-						lenLine, err := reader.ReadString('\n')
-						if err != nil {
-							return
-						}
-						if !strings.HasPrefix(lenLine, "$") {
-							return
-						}
-						length, _ := strconv.Atoi(strings.TrimSpace(lenLine[1:]))
-						buf := make([]byte, length+2)
-						if _, err := io.ReadFull(reader, buf); err != nil {
-							return
-						}
-						args = append(args, string(buf[:length]))
 					}
 					if len(args) == 0 {
 						return
@@ -333,7 +341,7 @@ func startMockRedisTokenSessionServer(t *testing.T, handler func(cmd string, arg
 	}
 }
 
-func TestMockRedisTokenSessionStore(t *testing.T) {
+func TestMockRedisTokenSessionStore_NoopAndMemory(t *testing.T) {
 	// 1. NoopTokenSessionStore
 	noop := NoopTokenSessionStore{}
 	if err := noop.Save(context.Background(), "t", auth.Claims{}); err != nil {
@@ -411,6 +419,20 @@ func TestMockRedisTokenSessionStore(t *testing.T) {
 	revoked2, err := mem.Revoke(ctx, "mytoken")
 	if err != nil || revoked2 {
 		t.Errorf("revoking non-existent token: revoked=%v, err=%v", revoked2, err)
+	}
+}
+
+func TestMockRedisTokenSessionStore_MockRedis(t *testing.T) {
+	ctx := context.Background()
+	claims := auth.Claims{
+		Subject: "user",
+		Role:    domain.RoleSales,
+		Expires: time.Now().Add(5 * time.Minute).Unix(),
+	}
+	expiredClaims := auth.Claims{
+		Subject: "user",
+		Role:    domain.RoleSales,
+		Expires: time.Now().Add(-5 * time.Minute).Unix(),
 	}
 
 	// 3. RedisTokenSessionStore with Mock Server
