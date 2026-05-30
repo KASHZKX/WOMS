@@ -853,21 +853,21 @@ func TestPersistPreviewAllocations(t *testing.T) {
 
 	allocs := []map[string]any{
 		{
-			"orderId": "ORD-1-1",
-			"lineId": "A",
-			"date": "2026-05-30T00:00:00Z",
-			"quantity": 300,
-			"priority": "high",
-			"locked": false,
+			"orderId":       "ORD-1-1",
+			"lineId":        "A",
+			"date":          "2026-05-30T00:00:00Z",
+			"quantity":      300,
+			"priority":      "high",
+			"locked":        false,
 			"sourceOrderId": "ORD-1",
 		},
 		{
-			"orderId": "ORD-1",
-			"lineId": "A",
-			"date": "2026-05-30T00:00:00Z",
-			"quantity": 200,
-			"priority": "high",
-			"locked": false,
+			"orderId":       "ORD-1",
+			"lineId":        "A",
+			"date":          "2026-05-30T00:00:00Z",
+			"quantity":      200,
+			"priority":      "high",
+			"locked":        false,
 			"sourceOrderId": "",
 		},
 	}
@@ -1352,4 +1352,3 @@ func TestProcessJobPayloadErrorPropagation(t *testing.T) {
 		t.Errorf("expected error, got %v", err)
 	}
 }
-

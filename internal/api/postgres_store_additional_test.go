@@ -1521,4 +1521,3 @@ func TestPostgresStore_ConfirmProduction_Various(t *testing.T) {
 		t.Errorf("expected quantity limit exceeded error, got %v", err)
 	}
 }
-
